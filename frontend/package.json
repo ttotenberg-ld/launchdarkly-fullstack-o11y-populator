@@ -1,0 +1,23 @@
+{
+  "name": "react-ld-observability-demo",
+  "private": true,
+  "version": "4.7.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@launchdarkly/observability": "^0.4.7",
+    "@launchdarkly/session-replay": "^0.4.0",
+    "launchdarkly-js-client-sdk": "^3.7.0",
+    "launchdarkly-react-client-sdk": "^3.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.1"
+  }
+}

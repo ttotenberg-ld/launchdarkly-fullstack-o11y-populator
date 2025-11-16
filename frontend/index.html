@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Content Security Policy (CSP) for LaunchDarkly SDK and Observability -->
+    <!-- 
+      Required CSP directives:
+      - connect-src: Allows connections to LaunchDarkly services
+        * clientstream.launchdarkly.com: SDK streaming connections
+        * events.launchdarkly.com: SDK event data
+        * pub.observability.app.launchdarkly.com: Observability data ingestion
+        * otel.observability.app.launchdarkly.com: OpenTelemetry data
+      - worker-src: Allows inline web workers used by observability plugins
+      
+      Note: For production, consider setting CSP via HTTP headers instead of meta tags
+            for better security and flexibility.
+    -->
+    <meta 
+      http-equiv="Content-Security-Policy" 
+      content="connect-src 'self' https://app.launchdarkly.com https://clientstream.launchdarkly.com https://events.launchdarkly.com https://pub.observability.app.launchdarkly.com https://otel.observability.app.launchdarkly.com; worker-src data: blob:;" 
+    />
+    <title>LaunchDarkly Observability Demo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
