@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [react()],
   build: {
     sourcemap: true, // Generate source maps for production builds
+    target: 'esnext', // Support top-level await
   },
 })
 

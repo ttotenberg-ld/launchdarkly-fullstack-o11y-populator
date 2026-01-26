@@ -1,365 +1,253 @@
-# LaunchDarkly Python Observability Demo
+# LaunchDarkly Observability Demo
 
-A comprehensive full-stack demonstration of LaunchDarkly's Python observability features, including error tracking, logging, distributed tracing, and feature flags integration.
-
-## Overview
-
-This demo showcases LaunchDarkly's observability capabilities in a realistic full-stack application:
-
-- **Backend**: Python Flask API with LaunchDarkly server-side SDK and observability plugin
-- **Frontend**: React application that calls the Python backend
-- **Observability**: Comprehensive error tracking, logging, and distributed tracing
-- **Feature Flags**: Server-side feature flag integration demonstrating dynamic configuration
+A full-stack microservices demo that generates realistic observability data (traces, logs, errors, sessions) for LaunchDarkly's observability platform.
 
 ## Architecture
 
 ```
-┌─────────────────┐      HTTP Requests       ┌─────────────────┐
-│                 │ ───────────────────────> │                 │
-│  React Frontend │                          │  Flask Backend  │
-│  (Port 5173)    │ <─────────────────────── │  (Port 5000)    │
-│                 │      JSON Responses      │                 │
-└─────────────────┘                          └─────────────────┘
-        │                                             │
-        │                                             │
-        │          LaunchDarkly Observability         │
-        └──────────────────┬──────────────────────────┘
-                           │
-                           ▼
-                ┌──────────────────────┐
-                │   LaunchDarkly       │
-                │   Platform           │
-                │                      │
-                │  • Errors            │
-                │  • Logs              │
-                │  • Traces            │
-                │  • Feature Flags     │
-                └──────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Frontend (React)                                │
+│                         http://localhost:3000                                │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
+│  │   Dashboard     │  │  Auto-Play      │  │   Manual Demo   │              │
+│  │   Metrics       │  │  Simulation     │  │   Controls      │              │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        API Gateway (:5000)                                   │
+│                    Routes requests to services                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+           │              │              │              │
+           ▼              ▼              ▼              ▼
+    ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+    │  Auth    │   │  User    │   │  Order   │   │  Search  │
+    │ :5001    │   │ :5002    │   │ :5003    │   │ :5008    │
+    └──────────┘   └──────────┘   └──────────┘   └──────────┘
+           │              │         │    │              │
+           ▼              ▼         │    ▼              ▼
+    ┌──────────┐   ┌──────────┐    │  ┌──────────┐   ┌──────────┐
+    │Analytics │   │Notific.  │    │  │ Payment  │   │Inventory │
+    │ :5007    │   │ :5006    │    │  │ :5004    │   │ :5005    │
+    └──────────┘   └──────────┘    │  └──────────┘   └──────────┘
+                                   │       │              │
+                                   └───────┴──────────────┘
+                                           ▼
+                                    ┌──────────┐
+                                    │Notific.  │
+                                    │ :5006    │
+                                    └──────────┘
 ```
 
-## Features Demonstrated
+## Features
 
-### 🐛 Error Tracking
-- **Manual Error Recording**: Caught errors with custom context
-- **Async Error Handling**: Errors in asynchronous operations
-- **Uncaught Exception Handling**: Global error handling
-- All errors sent to LaunchDarkly with full context and stack traces
-
-### 📝 Custom Logging
-- **Multiple Severity Levels**: Debug, Info, Warning, Error
-- **Structured Logging**: Logs with metadata and context
-- **Backend Logging**: Server-side log capture and forwarding
-
-### 🔍 Distributed Tracing
-- **Automatic Spans**: Simple operations with automatic lifecycle management
-- **Manual Spans**: Complex workflows with multiple tracked steps
-- **Frontend-to-Backend Tracing**: Full request flow visibility
-- **Python Context Managers**: Clean, Pythonic tracing patterns
-
-### 🚩 Feature Flags
-- **Server-Side Flags**: Feature toggles in Python backend
-- **Dynamic Configuration**: Toggle features without code changes
-- **Flag Evaluation Logging**: Track flag usage and variations
+- **9 Flask Microservices**: Realistic service mesh with inter-service communication
+- **Distributed Tracing**: End-to-end traces spanning frontend through multiple backend services
+- **Error Injection**: Configurable error rates that inject errors deep in trace chains
+- **Traffic Simulator**: Headless Python script generating continuous realistic traffic
+- **Auto-Play Frontend**: Browser-based simulation with real-time activity feed
+- **LaunchDarkly Observability**: Full integration with traces, logs, errors, and session replay
 
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.10 or higher
-- Node.js 16+ and npm
-- A LaunchDarkly account with observability features enabled
+- Docker and Docker Compose
+- LaunchDarkly account with Observability enabled
 
-### 1. Clone and Setup
+### Setup
 
-```bash
-# Clone or download this repository
-cd launchdarkly-python-o11y-demo
-```
-
-### 2. Backend Setup
+1. **Clone and configure:**
 
 ```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
+cd sor
 cp .env.example .env
-# Edit .env and add your LaunchDarkly server-side SDK key
 ```
 
-**Get your SDK key**: LaunchDarkly Dashboard → Project Settings → Environments → SDK Key
-
-### 3. Frontend Setup
+2. **Edit `.env` with your LaunchDarkly credentials:**
 
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Configure environment
-cp .env.example .env
-# Edit .env and add your LaunchDarkly client-side ID
+LD_SDK_KEY=sdk-xxxxx          # Server-side SDK key
+VITE_LD_CLIENT_SIDE_ID=xxxxx  # Client-side ID
 ```
 
-**Get your client-side ID**: LaunchDarkly Dashboard → Project Settings → Environments → Client-side ID
+3. **Start all services:**
 
-### 4. Run the Application
-
-**Terminal 1 - Backend:**
 ```bash
-cd backend
-source venv/bin/activate  # If not already activated
-python app.py
+docker-compose up --build
 ```
 
-Backend will start on http://localhost:5000
+4. **Access the demo:**
 
-**Terminal 2 - Frontend:**
+- Frontend: http://localhost:3000
+- API Gateway: http://localhost:5000
+
+## Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `api-gateway` | 5000 | Routes requests, auth validation |
+| `auth-service` | 5001 | Login, token validation, sessions |
+| `user-service` | 5002 | User profiles, preferences |
+| `order-service` | 5003 | Order processing, checkout flow |
+| `payment-service` | 5004 | Payment processing (error-prone) |
+| `inventory-service` | 5005 | Stock management, reservations |
+| `notification-service` | 5006 | Email/push notifications |
+| `analytics-service` | 5007 | Event tracking |
+| `search-service` | 5008 | Product search |
+
+## Generating Traffic
+
+### Option 1: Frontend Auto-Play
+
+1. Open http://localhost:3000
+2. Click the "Auto-play" toggle in the header
+3. Adjust the rate slider to control requests per minute
+
+### Option 2: Headless Simulator
+
+The simulator container runs automatically with Docker Compose:
+
 ```bash
-cd frontend
-npm run dev
+# View simulator logs
+docker-compose logs -f simulator
+
+# Adjust rate via environment variable
+REQUESTS_PER_MINUTE=60 docker-compose up simulator
 ```
 
-Frontend will start on http://localhost:5173
+### Option 3: Manual Testing
 
-### 5. Use the Demo
+Use the demo buttons in the frontend to manually trigger:
+- Error scenarios (frontend + backend)
+- Log messages at different severity levels
+- Distributed traces through the service mesh
 
-1. Open http://localhost:5173 in your browser
-2. Click buttons to trigger errors, logs, and traces
-3. View observability data in LaunchDarkly Dashboard → Observability section
-4. Toggle the `pythonDemoFeature` flag to see backend behavior change
+## Traffic Scenarios
 
-## Project Structure
+The simulator and auto-play feature run these weighted scenarios:
 
-```
-launchdarkly-python-o11y-demo/
-├── backend/                    # Python Flask API
-│   ├── app.py                 # Main application with all endpoints
-│   ├── requirements.txt       # Python dependencies
-│   ├── .env.example          # Environment template
-│   └── README.md             # Backend documentation
-│
-├── frontend/                  # React application
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── demo/          # Demo components (observability features)
-│   │   │   │   ├── ErrorDemo.jsx   # Error tracking UI
-│   │   │   │   ├── LogsDemo.jsx    # Logging UI
-│   │   │   │   ├── TracesDemo.jsx  # Tracing UI
-│   │   │   │   └── FancyWidget.jsx # Feature flag demo
-│   │   │   └── infrastructure/ # Supporting components
-│   │   │       ├── ErrorBoundary.jsx
-│   │   │       ├── DashboardLayout.jsx
-│   │   │       ├── Toast.jsx
-│   │   │       └── Toast.css
-│   │   ├── App.jsx
-│   │   └── main.jsx
-│   ├── package.json
-│   └── README.md             # Frontend documentation
-│
-└── README.md                  # This file
-```
+| Scenario | Weight | Description |
+|----------|--------|-------------|
+| Browse Products | 35% | List and view products |
+| User Login | 20% | Authentication flow |
+| Checkout Flow | 15% | Full checkout with payment |
+| Search Products | 15% | Search and filter |
+| Update Profile | 10% | Profile preferences |
+| View Dashboard | 5% | Dashboard metrics |
 
-## API Endpoints
+## Error Injection
 
-The Flask backend exposes these endpoints:
+Errors are injected based on configurable rates per service:
 
-### Error Tracking
-- `GET /api/errors/manual` - Trigger a manual error
-- `GET /api/errors/async` - Trigger an async error with delay
-- `GET /api/errors/uncaught` - Trigger an uncaught exception
+- **Payment Service**: 6% payment declined, 3% gateway timeout
+- **Inventory Service**: 8% out of stock
+- **Auth Service**: 5% invalid token
+- **API Gateway**: 2% rate limit exceeded
 
-### Logging
-- `GET /api/logs/debug` - Record debug log
-- `GET /api/logs/info` - Record info log
-- `GET /api/logs/warn` - Record warning log
-- `GET /api/logs/error` - Record error log
+This creates realistic error scenarios that appear deep in trace chains.
 
-### Tracing
-- `POST /api/traces/simple` - Create automatic span
-- `POST /api/traces/multi-step` - Create manual span with multiple steps
+## User Personas
 
-### Feature Flags
-- `GET /api/feature-demo` - Demonstrate feature flag integration
+Sessions use LaunchDarkly-punny email addresses:
 
-### Health
-- `GET /api/health` - Health check endpoint
-- `GET /` - API information
-
-## Viewing Observability Data
-
-1. Log in to your LaunchDarkly account
-2. Navigate to **Observability** in the left sidebar
-3. You'll see:
-   - **Errors**: All captured errors with stack traces, context, and timestamps
-   - **Logs**: Structured logs with severity levels and metadata
-   - **Traces**: Distributed traces showing request flows from frontend to backend
-   - **Metrics**: Auto-generated metrics based on OpenTelemetry data
+- luna@staylightly.io
+- lance@darklaunchly.com
+- darcy@lunchdarkly.net
+- larry@launchdorkly.io
+- lydia@dimlylaunch.com
+- drake@launchbrightly.io
+- dawn@toggledarkly.com
+- felix@flaglaunchly.io
+- sage@rolldarkly.net
+- nova@launchsoftly.io
 
 ## Configuration
 
-### Backend Configuration (`.env`)
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LD_SDK_KEY` | - | LaunchDarkly server-side SDK key |
+| `VITE_LD_CLIENT_SIDE_ID` | - | LaunchDarkly client-side ID |
+| `ENVIRONMENT` | development | Environment name |
+| `REQUESTS_PER_MINUTE` | 30 | Simulator request rate |
+| `ERROR_SESSION_RATE` | 0.15 | Percentage of sessions with errors |
+
+## Development
+
+### Running Locally (without Docker)
+
+**Backend services:**
 
 ```bash
-# LaunchDarkly server-side SDK key
-LD_SDK_KEY=sdk-key-123abc
+cd backend
+pip install -r requirements.txt
 
-# Observability settings
-SERVICE_NAME=python-observability-demo
-SERVICE_VERSION=1.0.0
-ENVIRONMENT=development
-
-# Flask settings
-FLASK_ENV=development
-FLASK_PORT=5000
+# Start each service (in separate terminals)
+cd services/api-gateway && python app.py
+cd services/auth-service && python app.py
+# ... etc
 ```
 
-### Frontend Configuration (`.env`)
+**Frontend:**
 
 ```bash
-# LaunchDarkly client-side ID (not secret)
-VITE_LD_CLIENT_SIDE_ID=your-client-side-id
-
-# Backend API URL
-VITE_API_URL=http://localhost:5000
+cd frontend
+npm install
+npm run dev
 ```
 
-## Key Implementation Details
+**Simulator:**
 
-### Python SDK Initialization
-
-```python
-from ldobserve import ObservabilityConfig, ObservabilityPlugin
-
-observability_config = ObservabilityConfig(
-    service_name='python-observability-demo',
-    service_version='1.0.0',
-    environment='development'
-)
-
-plugin = ObservabilityPlugin(observability_config)
-
-config = Config(
-    sdk_key=sdk_key,
-    plugins=[plugin]
-)
-
-ldclient.set_config(config)
+```bash
+cd simulator
+pip install -r requirements.txt
+python traffic_generator.py
 ```
 
-### Error Recording
+## Observability in LaunchDarkly
 
-```python
-import ldobserve
+After running for a few minutes, you should see in your LaunchDarkly dashboard:
 
-try:
-    # Some operation
-    raise ValueError("Something went wrong")
-except Exception as error:
-    ldobserve.record_error(
-        error,
-        'Operation failed',
-        {'context': 'additional_info'}
-    )
-```
+1. **Traces**: Distributed traces showing request flow through services
+2. **Errors**: Errors with source attribution (frontend/backend)
+3. **Logs**: Structured logs at different severity levels
+4. **Sessions**: User sessions with replay capability
 
-### Logging
+### Filtering Tips
 
-```python
-ldobserve.record_log(
-    'User action completed',
-    'info',
-    {'user_id': 123, 'action': 'purchase'}
-)
-```
-
-### Tracing
-
-```python
-# Automatic span
-with ldobserve.start_span('operation.name') as span:
-    span.set_attribute('key', 'value')
-    # Operation here
-    # Span ends automatically
-
-# Manual span with multiple steps
-with ldobserve.start_manual_span('workflow.name') as span:
-    try:
-        span.set_attribute('step', 1)
-        # Step 1
-        span.set_attribute('step', 2)
-        # Step 2
-        span.set_status_ok()
-    except Exception as error:
-        span.set_status_error(str(error))
-```
-
-### Feature Flag Evaluation
-
-```python
-flag_value = client.variation('pythonDemoFeature', context, False)
-
-if flag_value:
-    # Enhanced behavior
-    return enhanced_response
-else:
-    # Basic behavior
-    return basic_response
-```
+- Filter by `source: frontend` or `source: backend`
+- Filter by `service: payment-service` to see payment errors
+- Look for traces with errors to see where failures occur in the chain
 
 ## Troubleshooting
 
-### Backend won't start
+### Services not connecting
 
-- Ensure Python 3.10+ is installed: `python --version`
-- Activate virtual environment: `source venv/bin/activate`
-- Install dependencies: `pip install -r requirements.txt`
-- Check `.env` file exists with valid SDK key
+```bash
+# Check if all containers are running
+docker-compose ps
 
-### Frontend can't connect to backend
-
-- Ensure backend is running on port 5000
-- Check `VITE_API_URL` in frontend `.env`
-- Check browser console for CORS errors
+# View logs for a specific service
+docker-compose logs api-gateway
+```
 
 ### No data in LaunchDarkly
 
-- Verify SDK keys are correct
-- Check LaunchDarkly account has observability features enabled
-- Look for errors in backend terminal output
-- Ensure you're looking at the correct environment in LaunchDarkly
+1. Verify your SDK keys are correct in `.env`
+2. Check service logs for connection errors
+3. Ensure your LaunchDarkly project has Observability enabled
 
-## Resources
+### Frontend not loading
 
-- [LaunchDarkly Python SDK Observability Docs](https://launchdarkly.com/docs/sdk/observability/python)
-- [LaunchDarkly Python SDK Docs](https://launchdarkly.com/docs/sdk/server-side/python)
-- [LaunchDarkly Observability Overview](https://launchdarkly.com/docs/home/observability)
-- [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
-
-## Training Resources
-
-This demo is designed for training on LaunchDarkly observability features. Use it to:
-
-1. **Learn the Basics**: Understand error tracking, logging, and tracing
-2. **Explore the API**: See real-world usage patterns
-3. **Test Integration**: Experiment with your own modifications
-4. **Practice Troubleshooting**: Use observability data to debug issues
-
-## Support
-
-For questions or issues:
-- [LaunchDarkly Support](https://support.launchdarkly.com/)
-- [LaunchDarkly Community](https://launchdarkly.com/community/)
+```bash
+# Rebuild the frontend
+docker-compose build frontend
+docker-compose up -d frontend
+```
 
 ## License
 
-This demo application is provided as-is for educational purposes.
-
-
+MIT

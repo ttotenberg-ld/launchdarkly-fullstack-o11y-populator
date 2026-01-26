@@ -1,0 +1,219 @@
+version: '3.8'
+
+services:
+  # API Gateway - Entry point for all requests
+  api-gateway:
+    build:
+      context: ./backend
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "5050:5000"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=api-gateway
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5000
+      - USE_DOCKER=true
+    depends_on:
+      - auth-service
+      - user-service
+      - order-service
+      - search-service
+      - inventory-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Auth Service
+  auth-service:
+    build:
+      context: ./backend
+      dockerfile: services/auth-service/Dockerfile
+    ports:
+      - "5001:5001"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=auth-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5001
+      - USE_DOCKER=true
+    depends_on:
+      - analytics-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # User Service
+  user-service:
+    build:
+      context: ./backend
+      dockerfile: services/user-service/Dockerfile
+    ports:
+      - "5002:5002"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=user-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5002
+      - USE_DOCKER=true
+    depends_on:
+      - analytics-service
+      - notification-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Order Service
+  order-service:
+    build:
+      context: ./backend
+      dockerfile: services/order-service/Dockerfile
+    ports:
+      - "5003:5003"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=order-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5003
+      - USE_DOCKER=true
+    depends_on:
+      - payment-service
+      - inventory-service
+      - notification-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Payment Service
+  payment-service:
+    build:
+      context: ./backend
+      dockerfile: services/payment-service/Dockerfile
+    ports:
+      - "5004:5004"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=payment-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5004
+      - USE_DOCKER=true
+    depends_on:
+      - notification-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Inventory Service
+  inventory-service:
+    build:
+      context: ./backend
+      dockerfile: services/inventory-service/Dockerfile
+    ports:
+      - "5005:5005"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=inventory-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5005
+      - USE_DOCKER=true
+    depends_on:
+      - notification-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Notification Service (leaf service - no dependencies)
+  notification-service:
+    build:
+      context: ./backend
+      dockerfile: services/notification-service/Dockerfile
+    ports:
+      - "5006:5006"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=notification-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5006
+      - USE_DOCKER=true
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Analytics Service (leaf service - no dependencies)
+  analytics-service:
+    build:
+      context: ./backend
+      dockerfile: services/analytics-service/Dockerfile
+    ports:
+      - "5007:5007"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=analytics-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5007
+      - USE_DOCKER=true
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Search Service
+  search-service:
+    build:
+      context: ./backend
+      dockerfile: services/search-service/Dockerfile
+    ports:
+      - "5008:5008"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=search-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5008
+      - USE_DOCKER=true
+    depends_on:
+      - inventory-service
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - VITE_LD_CLIENT_SIDE_ID=${VITE_LD_CLIENT_SIDE_ID}
+        - VITE_API_URL=http://localhost:5050
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Traffic Simulator
+  simulator:
+    build:
+      context: .
+      dockerfile: simulator/Dockerfile
+    environment:
+      - API_GATEWAY_URL=http://api-gateway:5000
+      - REQUESTS_PER_MINUTE=${REQUESTS_PER_MINUTE:-30}
+      - ERROR_SESSION_RATE=${ERROR_SESSION_RATE:-0.15}
+    depends_on:
+      - api-gateway
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+networks:
+  ld-observability:
+    driver: bridge

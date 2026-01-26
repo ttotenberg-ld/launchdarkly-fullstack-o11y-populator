@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { LDObserve } from '@launchdarkly/observability';
 import { showToast } from '../infrastructure/Toast';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 function TracesDemo() {
   const [simpleResult, setSimpleResult] = useState(null);
