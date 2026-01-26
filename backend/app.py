@@ -3,6 +3,7 @@ import time
 import asyncio
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from opentelemetry.instrumentation.flask import FlaskInstrumentor
 from dotenv import load_dotenv
 import ldclient
 from ldclient.config import Config
@@ -18,6 +19,7 @@ load_dotenv()
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend communication
+FlaskInstrumentor().instrument_app(app)  # Enable distributed trace context propagation
 
 # LaunchDarkly Configuration
 sdk_key = os.getenv('LD_SDK_KEY', 'sdk-key-123abc')
