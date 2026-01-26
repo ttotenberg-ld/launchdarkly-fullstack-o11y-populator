@@ -199,14 +199,16 @@ services:
     restart: unless-stopped
 
   # Traffic Simulator (Browser-based with Playwright)
+  # Human-like sessions: ~30 seconds each, with typing, hesitation, and full endpoint coverage
   simulator:
     build:
       context: .
       dockerfile: simulator/Dockerfile
     environment:
       - FRONTEND_URL=http://frontend:80
-      - SESSIONS_PER_MINUTE=${SESSIONS_PER_MINUTE:-10}
+      - SESSIONS_PER_MINUTE=${SESSIONS_PER_MINUTE:-2}
       - MAX_CONCURRENT_BROWSERS=${MAX_CONCURRENT_BROWSERS:-3}
+      - TARGET_SESSION_DURATION=${TARGET_SESSION_DURATION:-30}
     depends_on:
       - frontend
       - api-gateway
