@@ -149,10 +149,16 @@ launchdarkly-python-o11y-demo/
 ├── frontend/                  # React application
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ErrorDemo.jsx   # Error tracking UI
-│   │   │   ├── LogsDemo.jsx    # Logging UI
-│   │   │   ├── TracesDemo.jsx  # Tracing UI
-│   │   │   └── ...
+│   │   │   ├── demo/          # Demo components (observability features)
+│   │   │   │   ├── ErrorDemo.jsx   # Error tracking UI
+│   │   │   │   ├── LogsDemo.jsx    # Logging UI
+│   │   │   │   ├── TracesDemo.jsx  # Tracing UI
+│   │   │   │   └── FancyWidget.jsx # Feature flag demo
+│   │   │   └── infrastructure/ # Supporting components
+│   │   │       ├── ErrorBoundary.jsx
+│   │   │       ├── DashboardLayout.jsx
+│   │   │       ├── Toast.jsx
+│   │   │       └── Toast.css
 │   │   ├── App.jsx
 │   │   └── main.jsx
 │   ├── package.json
@@ -355,4 +361,5 @@ For questions or issues:
 ## License
 
 This demo application is provided as-is for educational purposes.
+
 

@@ -20,11 +20,18 @@ class ErrorBoundary extends React.Component {
     // Log error details
     console.error('Error caught by boundary:', error, errorInfo);
     
-    // Forward error to LaunchDarkly Observability
+    // Forward error to LaunchDarkly Observability with clear source attribution
     LDObserve.recordError(
       error,
-      'React Error Boundary',
-      { componentStack: errorInfo.componentStack }
+      'Frontend: React Error Boundary caught error',
+      { 
+        source: 'frontend',
+        service: 'react-frontend',
+        component: 'ErrorBoundary',
+        componentStack: errorInfo.componentStack,
+        errorType: error.name || 'Error',
+        message: error.message
+      }
     );
 
     // Store error details in state

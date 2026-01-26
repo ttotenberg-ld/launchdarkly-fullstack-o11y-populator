@@ -25,7 +25,7 @@ import './index.css'
       options: {
         plugins: [
           new Observability({
-            version: '4.7.1',
+            version: '10.7.1',
             tracingOrigins: true,
             networkRecording: {
               enabled: true,

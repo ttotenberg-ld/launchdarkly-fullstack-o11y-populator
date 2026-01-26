@@ -1,9 +1,9 @@
 import { withLDConsumer } from "launchdarkly-react-client-sdk";
 import ErrorBoundary from './ErrorBoundary';
-import ErrorDemo from './ErrorDemo';
-import LogsDemo from './LogsDemo';
-import TracesDemo from './TracesDemo';
-import FancyWidget from './FancyWidget';
+import ErrorDemo from '../demo/ErrorDemo';
+import LogsDemo from '../demo/LogsDemo';
+import TracesDemo from '../demo/TracesDemo';
+import FancyWidget from '../demo/FancyWidget';
 
 function DashboardLayout( { flags } ) {
   // Debug: Log flags to console
