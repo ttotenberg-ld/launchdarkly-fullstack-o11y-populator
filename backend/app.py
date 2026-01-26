@@ -18,7 +18,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend communication
+CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])  # Enable CORS for frontend communication with trace headers
 FlaskInstrumentor().instrument_app(app)  # Enable distributed trace context propagation
 
 # LaunchDarkly Configuration

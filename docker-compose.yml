@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # API Gateway - Entry point for all requests
   api-gateway:
@@ -190,7 +188,8 @@ services:
       context: ./frontend
       args:
         - VITE_LD_CLIENT_SIDE_ID=${VITE_LD_CLIENT_SIDE_ID}
-        - VITE_API_URL=http://localhost:5050
+        # Use empty string so frontend uses relative URLs (/api/...) which nginx proxies
+        - VITE_API_URL=
     ports:
       - "3000:80"
     depends_on:
@@ -199,20 +198,26 @@ services:
       - ld-observability
     restart: unless-stopped
 
-  # Traffic Simulator
+  # Traffic Simulator (Browser-based with Playwright)
   simulator:
     build:
       context: .
       dockerfile: simulator/Dockerfile
     environment:
-      - API_GATEWAY_URL=http://api-gateway:5000
-      - REQUESTS_PER_MINUTE=${REQUESTS_PER_MINUTE:-30}
-      - ERROR_SESSION_RATE=${ERROR_SESSION_RATE:-0.15}
+      - FRONTEND_URL=http://frontend:80
+      - SESSIONS_PER_MINUTE=${SESSIONS_PER_MINUTE:-10}
+      - MAX_CONCURRENT_BROWSERS=${MAX_CONCURRENT_BROWSERS:-3}
     depends_on:
+      - frontend
       - api-gateway
     networks:
       - ld-observability
     restart: unless-stopped
+    # Playwright needs more resources
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
 networks:
   ld-observability:

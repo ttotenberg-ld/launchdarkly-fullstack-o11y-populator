@@ -6,6 +6,26 @@ import SessionReplay from '@launchdarkly/session-replay'
 import App from './App.jsx'
 import './index.css'
 
+// Build tracingOrigins patterns for distributed tracing
+const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const tracingOrigins = [
+  /localhost:5000/,           // Local development
+  /api-gateway/,              // Docker internal network
+  /127\.0\.0\.1:5000/,        // Local IP
+];
+
+// Add the configured API URL as a pattern
+if (apiUrl) {
+  try {
+    const url = new URL(apiUrl);
+    const escapedHost = url.host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    tracingOrigins.push(new RegExp(escapedHost));
+  } catch {
+    // If not a valid URL, add as-is
+    tracingOrigins.push(new RegExp(apiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+}
+
 (async () => {
   try {
     const clientSideID = import.meta.env.VITE_LD_CLIENT_SIDE_ID;
@@ -18,22 +38,22 @@ import './index.css'
       clientSideID,
       context: {
         kind: 'user',
-        key: 'user-' + Math.random().toString(36).substr(2, 9),
-        name: 'Demo User',
-        email: 'demo@example.com'
+        key: 'anonymous-' + Math.random().toString(36).substr(2, 9),
+        anonymous: true
       },
       options: {
         plugins: [
           new Observability({
-            version: '10.7.1',
-            tracingOrigins: true,
+            version: '1.0.0',
+            tracingOrigins: tracingOrigins,
             networkRecording: {
               enabled: true,
               recordHeadersAndBody: true
             }
           }),
           new SessionReplay({
-            privacySetting: 'none'
+            privacySetting: 'none',
+            inlineStylesheet: true
           })
         ]
       }

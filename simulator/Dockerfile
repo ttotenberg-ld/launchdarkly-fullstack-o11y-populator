@@ -1,4 +1,5 @@
-FROM python:3.11-slim
+# Use Playwright's official Python image with browsers pre-installed
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 WORKDIR /app
 
@@ -9,14 +10,17 @@ COPY backend/shared /app/backend/shared
 COPY simulator/traffic_generator.py /app/
 COPY simulator/requirements.txt /app/
 
-# Install dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers (Chromium only for smaller image)
+RUN playwright install chromium
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
-ENV API_GATEWAY_URL=http://api-gateway:5000
-ENV REQUESTS_PER_MINUTE=30
-ENV ERROR_SESSION_RATE=0.15
+ENV FRONTEND_URL=http://frontend:80
+ENV SESSIONS_PER_MINUTE=10
+ENV MAX_CONCURRENT_BROWSERS=3
 
 # Run the traffic generator
 CMD ["python", "traffic_generator.py"]

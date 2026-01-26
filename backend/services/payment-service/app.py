@@ -28,7 +28,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
 FlaskInstrumentor().instrument_app(app)
 RequestsInstrumentor().instrument()
 
