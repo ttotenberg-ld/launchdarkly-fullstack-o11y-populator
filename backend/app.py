@@ -13,13 +13,18 @@ import ldobserve
 from ldobserve import ObservabilityConfig, ObservabilityPlugin
 from ldobserve.observe import record_log, record_exception, start_span, LEVELS
 
+# Configure OpenTelemetry propagation for distributed tracing
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.propagators.composite import CompositePropagator
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+# NOTE: We do NOT set the global textmap here at module import time.
+# The LaunchDarkly SDK's ObservabilityPlugin sets up its own tracer provider,
+# which may reset or override propagation settings. We must set the propagator
+# AFTER the LD client is initialized (see below after ldclient.set_config).
+
 # Load environment variables
 load_dotenv()
-
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])  # Enable CORS for frontend communication with trace headers
-FlaskInstrumentor().instrument_app(app)  # Enable distributed trace context propagation
 
 # LaunchDarkly Configuration
 sdk_key = os.getenv('LD_SDK_KEY', 'sdk-key-123abc')
@@ -27,7 +32,7 @@ service_name = os.getenv('SERVICE_NAME', 'python-observability-demo')
 service_version = os.getenv('SERVICE_VERSION', '1.0.0')
 environment = os.getenv('ENVIRONMENT', 'development')
 
-# Initialize LaunchDarkly with Observability Plugin
+# IMPORTANT: Initialize LaunchDarkly FIRST to set up tracer provider
 observability_config = ObservabilityConfig(
     service_name=service_name,
     service_version=service_version,
@@ -48,6 +53,22 @@ print(f"✓ LaunchDarkly Python SDK initialized with observability")
 print(f"  Service: {service_name}")
 print(f"  Version: {service_version}")
 print(f"  Environment: {environment}")
+
+# Set up W3C Trace Context propagation AFTER LD client is initialized
+# This ensures traceparent/tracestate headers are properly parsed from
+# incoming requests (for distributed tracing from browser to backend).
+# CRITICAL: This must happen AFTER ldclient.set_config() to ensure the
+# propagator is active when Flask processes requests.
+set_global_textmap(CompositePropagator([TraceContextTextMapPropagator()]))
+print("  ✓ W3C Trace Context propagation enabled")
+
+# Initialize Flask app AFTER LD client
+app = Flask(__name__)
+CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
+
+# Set up Flask instrumentation AFTER LD client is initialized
+FlaskInstrumentor().instrument_app(app)
+print("  ✓ Flask instrumentation enabled")
 
 # Default LaunchDarkly context for flag evaluations
 default_context = Context.builder("demo-user").name("Demo User").build()

@@ -2,7 +2,9 @@
  * API service with trace context propagation for LaunchDarkly Observability.
  */
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// Use VITE_API_URL if set, otherwise use empty string for relative URLs
+// (nginx will proxy /api/* to the api-gateway)
+const API_URL = import.meta.env.VITE_API_URL ?? '';
 
 // User personas with LaunchDarkly pun emails
 const USER_PERSONAS = [

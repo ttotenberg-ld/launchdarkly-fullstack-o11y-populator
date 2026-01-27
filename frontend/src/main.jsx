@@ -7,14 +7,25 @@ import App from './App.jsx'
 import './index.css'
 
 // Build tracingOrigins patterns for distributed tracing
-const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// This determines which outgoing requests get trace context headers added
+const apiUrl = import.meta.env.VITE_API_URL || '';
 const tracingOrigins = [
-  /localhost:5000/,           // Local development
+  /localhost:5000/,           // Local development - direct API access
+  /localhost:3000/,           // Local development - via frontend proxy
   /api-gateway/,              // Docker internal network
-  /127\.0\.0\.1:5000/,        // Local IP
+  /127\.0\.0\.1/,             // Local IP
 ];
 
-// Add the configured API URL as a pattern
+// Add the current origin (critical for same-origin API requests via nginx proxy)
+try {
+  const currentOrigin = window.location.origin;
+  const escapedOrigin = currentOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  tracingOrigins.push(new RegExp(escapedOrigin));
+} catch {
+  // Window not available (SSR), skip
+}
+
+// Add the configured API URL as a pattern if specified
 if (apiUrl) {
   try {
     const url = new URL(apiUrl);

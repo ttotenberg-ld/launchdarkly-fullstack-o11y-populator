@@ -1,5 +1,9 @@
 """
 Shared observability configuration for LaunchDarkly services.
+Includes W3C Trace Context propagation for distributed tracing.
+
+IMPORTANT: Call create_ld_client() FIRST, then setup_flask_instrumentation()
+to ensure proper trace context propagation.
 """
 
 import os
@@ -8,6 +12,17 @@ from typing import Optional
 import ldclient
 from ldclient.config import Config
 from ldobserve import ObservabilityConfig, ObservabilityPlugin
+
+# Configure OpenTelemetry propagation for distributed tracing
+from opentelemetry import trace
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.propagators.composite import CompositePropagator
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+# NOTE: We do NOT set the global textmap here at module import time.
+# The LaunchDarkly SDK's ObservabilityPlugin sets up its own tracer provider,
+# which may reset or override propagation settings. We must set the propagator
+# AFTER the LD client is initialized, which happens in setup_flask_instrumentation().
 
 
 def create_observability_config(
@@ -84,6 +99,38 @@ def create_ld_client(
     print(f"  Environment: {environment}")
     
     return client
+
+
+def setup_flask_instrumentation(app):
+    """
+    Set up Flask and requests instrumentation for distributed tracing.
+    
+    MUST be called AFTER create_ld_client() so the tracer provider is ready.
+    
+    This function also configures W3C Trace Context propagation, which MUST happen
+    AFTER the LaunchDarkly SDK initializes its tracer provider.
+    
+    Args:
+        app: Flask application instance
+    """
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+    from opentelemetry.instrumentation.requests import RequestsInstrumentor
+    
+    # Set up W3C Trace Context propagation AFTER LD client is initialized
+    # This ensures traceparent/tracestate headers are properly parsed from
+    # incoming requests and injected into outgoing requests.
+    # CRITICAL: This must happen AFTER create_ld_client() to ensure the
+    # propagator is active when Flask processes requests.
+    set_global_textmap(CompositePropagator([TraceContextTextMapPropagator()]))
+    print("  ✓ W3C Trace Context propagation enabled")
+    
+    # Instrument Flask to capture incoming requests and extract trace context
+    FlaskInstrumentor().instrument_app(app)
+    
+    # Instrument requests library to propagate trace context to downstream services
+    RequestsInstrumentor().instrument()
+    
+    print("  ✓ Flask and requests instrumentation enabled")
 
 
 def get_common_attributes(service_name: str, endpoint: str = None) -> dict:

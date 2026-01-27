@@ -10,8 +10,6 @@ import random
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from opentelemetry.instrumentation.flask import FlaskInstrumentor
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from dotenv import load_dotenv
 
 from ldobserve.observe import record_log, record_exception, start_span, LEVELS
@@ -19,7 +17,7 @@ from ldobserve.observe import record_log, record_exception, start_span, LEVELS
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from shared.observability import create_ld_client, get_common_attributes
+from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user
 from shared.error_injection import maybe_raise_error, InjectedError
 from shared.service_names import get_service_url
@@ -27,19 +25,20 @@ from shared.service_names import get_service_url
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
-FlaskInstrumentor().instrument_app(app)
-RequestsInstrumentor().instrument()
-
 # Service configuration
 SERVICE_NAME = os.getenv('SERVICE_NAME', 'order-service')
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '1.0.0')
 USE_DOCKER = os.getenv('USE_DOCKER', 'true').lower() == 'true'
 
-# Initialize LaunchDarkly
+# IMPORTANT: Initialize LaunchDarkly FIRST to set up tracer provider
 client = create_ld_client(SERVICE_NAME, SERVICE_VERSION)
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
+
+# Set up instrumentation AFTER LD client is initialized
+setup_flask_instrumentation(app)
 
 # Sample products
 PRODUCTS = [

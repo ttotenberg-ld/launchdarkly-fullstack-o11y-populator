@@ -8,16 +8,18 @@ import time
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from opentelemetry.instrumentation.flask import FlaskInstrumentor
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from dotenv import load_dotenv
 
 from ldobserve.observe import record_log, record_exception, start_span, LEVELS
 
+# OpenTelemetry imports for diagnostics
+from opentelemetry import trace
+from opentelemetry.propagate import get_global_textmap
+
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from shared.observability import create_ld_client, get_common_attributes
+from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user, get_user_context
 from shared.error_injection import maybe_raise_error, InjectedError
 from shared.service_names import get_service_url
@@ -25,19 +27,75 @@ from shared.service_names import get_service_url
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
-FlaskInstrumentor().instrument_app(app)
-RequestsInstrumentor().instrument()
-
 # Service configuration
 SERVICE_NAME = os.getenv('SERVICE_NAME', 'api-gateway')
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '1.0.0')
 USE_DOCKER = os.getenv('USE_DOCKER', 'true').lower() == 'true'
 
-# Initialize LaunchDarkly
+# IMPORTANT: Initialize LaunchDarkly FIRST to set up tracer provider
 client = create_ld_client(SERVICE_NAME, SERVICE_VERSION)
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
+
+# Set up instrumentation AFTER LD client is initialized
+setup_flask_instrumentation(app)
+
+
+# ============================================================================
+# DIAGNOSTIC: Log trace context on every request
+# ============================================================================
+import sys
+import logging
+
+# Create a dedicated logger for trace debugging
+trace_logger = logging.getLogger('trace_debug')
+trace_logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.DEBUG)
+handler.setFormatter(logging.Formatter('%(message)s'))
+trace_logger.addHandler(handler)
+
+@app.before_request
+def log_trace_context():
+    """Log incoming trace context for debugging distributed tracing."""
+    # Get incoming headers
+    traceparent = request.headers.get('traceparent', 'NOT_PRESENT')
+    tracestate = request.headers.get('tracestate', 'NOT_PRESENT')
+    
+    # Get the current span from OpenTelemetry
+    current_span = trace.get_current_span()
+    span_context = current_span.get_span_context() if current_span else None
+    
+    # Get the global propagator type
+    propagator = get_global_textmap()
+    propagator_type = type(propagator).__name__
+    
+    msg = [
+        "",
+        "=" * 60,
+        f"[TRACE DEBUG] {request.method} {request.path}",
+        f"  Incoming traceparent: {traceparent}",
+        f"  Incoming tracestate: {tracestate}",
+        f"  Global propagator: {propagator_type}",
+    ]
+    
+    if span_context:
+        msg.extend([
+            f"  Current span trace_id: {format(span_context.trace_id, '032x')}",
+            f"  Current span span_id: {format(span_context.span_id, '016x')}",
+            f"  Current span is_valid: {span_context.is_valid}",
+            f"  Current span is_remote: {span_context.is_remote}",
+        ])
+    else:
+        msg.append("  Current span: None")
+    
+    msg.append("=" * 60)
+    
+    for line in msg:
+        trace_logger.info(line)
+    sys.stdout.flush()
 
 
 def get_trace_headers():
