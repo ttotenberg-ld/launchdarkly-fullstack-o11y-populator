@@ -687,8 +687,11 @@ class TrafficGenerator:
                 await page.close()
     
     async def run_forever(self):
-        """Run traffic generation forever."""
+        """Run traffic generation forever with overlapping sessions."""
         interval = 60.0 / self.sessions_per_minute
+        
+        # Calculate expected concurrent sessions
+        expected_concurrent = TARGET_SESSION_DURATION / interval
         
         print(f"\n{'='*70}")
         print(f"  LaunchDarkly Observability Demo - Human-like Traffic Generator")
@@ -697,6 +700,7 @@ class TrafficGenerator:
         print(f"  Rate: {self.sessions_per_minute} sessions/minute")
         print(f"  Target session duration: {TARGET_SESSION_DURATION} seconds")
         print(f"  Interval: {interval:.2f} seconds between session starts")
+        print(f"  Expected concurrent sessions: ~{expected_concurrent:.1f}")
         print(f"  Max concurrent browsers: {MAX_CONCURRENT_BROWSERS}")
         print(f"{'='*70}")
         print(f"  Human-like behaviors enabled:")
@@ -717,21 +721,37 @@ class TrafficGenerator:
                 user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
             
+            # Track running session tasks
+            running_tasks: set = set()
+            
+            async def session_wrapper():
+                """Wrapper to run session and print stats."""
+                task = asyncio.current_task()
+                running_tasks.add(task)
+                try:
+                    await self.run_session(context)
+                    
+                    # Print stats every 5 sessions
+                    if self.session_count % 5 == 0:
+                        error_rate = (self.error_count / self.session_count * 100) if self.session_count > 0 else 0
+                        print(f"\n{'='*50}")
+                        print(f"[Stats] Sessions: {self.session_count}, "
+                              f"Success: {self.success_count}, "
+                              f"Errors: {self.error_count} ({error_rate:.1f}%), "
+                              f"Active: {len(running_tasks)}")
+                        print(f"{'='*50}\n")
+                except Exception as e:
+                    print(f"Error in session: {e}")
+                finally:
+                    running_tasks.discard(task)
+            
             try:
                 while True:
                     try:
-                        await self.run_session(context)
+                        # Spawn session without waiting for it to complete
+                        asyncio.create_task(session_wrapper())
                         
-                        # Print stats every 5 sessions
-                        if self.session_count % 5 == 0:
-                            error_rate = (self.error_count / self.session_count * 100) if self.session_count > 0 else 0
-                            print(f"\n{'='*50}")
-                            print(f"[Stats] Sessions: {self.session_count}, "
-                                  f"Success: {self.success_count}, "
-                                  f"Errors: {self.error_count} ({error_rate:.1f}%)")
-                            print(f"{'='*50}\n")
-                        
-                        # Wait before next session
+                        # Wait before starting next session
                         await asyncio.sleep(interval)
                         
                     except KeyboardInterrupt:
@@ -741,6 +761,10 @@ class TrafficGenerator:
                         print(f"Error in traffic loop: {e}")
                         await asyncio.sleep(interval)
             finally:
+                # Wait for running sessions to complete before closing
+                if running_tasks:
+                    print(f"Waiting for {len(running_tasks)} active sessions to complete...")
+                    await asyncio.gather(*running_tasks, return_exceptions=True)
                 await context.close()
                 await self.browser.close()
     

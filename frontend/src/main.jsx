@@ -5,6 +5,7 @@ import Observability from '@launchdarkly/observability'
 import SessionReplay from '@launchdarkly/session-replay'
 import App from './App.jsx'
 import './index.css'
+import { initializeErrorInjection } from './utils/errorInjection'
 
 // Build tracingOrigins patterns for distributed tracing
 // This determines which outgoing requests get trace context headers added
@@ -69,6 +70,11 @@ if (apiUrl) {
         ]
       }
     });
+
+    // Initialize error injection for observability demo
+    // This may inject random errors to simulate real-world error scenarios
+    // Errors are captured by the Observability SDK and will appear on documentLoad spans
+    initializeErrorInjection();
 
     ReactDOM.createRoot(document.getElementById('root')).render(
       <React.StrictMode>
