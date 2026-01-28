@@ -5,7 +5,7 @@
  */
 
 // Probability of injecting an error during page load (5% by default)
-const ERROR_INJECTION_RATE = parseFloat(import.meta.env.VITE_ERROR_INJECTION_RATE || '0.05');
+const ERROR_INJECTION_RATE = parseFloat(import.meta.env.VITE_ERROR_INJECTION_RATE || '0.75');
 
 // Whether error injection is enabled
 const ERROR_INJECTION_ENABLED = import.meta.env.VITE_ERROR_INJECTION_ENABLED !== 'false';
