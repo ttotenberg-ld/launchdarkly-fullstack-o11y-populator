@@ -47,7 +47,11 @@ def create_observability_config(
     return ObservabilityConfig(
         service_name=service_name,
         service_version=service_version,
-        environment=environment
+        environment=environment,
+        # Prevent auto_instrumentation.initialize() (called inside ObservabilityPlugin.__init__)
+        # from double-instrumenting Flask and requests. Those are handled explicitly by
+        # setup_flask_instrumentation(), matching the reference implementation's pattern.
+        disabled_instrumentations=['flask', 'requests'],
     )
 
 

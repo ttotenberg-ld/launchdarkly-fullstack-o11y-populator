@@ -308,4 +308,4 @@ def root():
 if __name__ == '__main__':
     port = int(os.getenv('FLASK_PORT', 5000))
     print(f"\n🚀 Starting {SERVICE_NAME} on http://localhost:{port}")
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=False, host='0.0.0.0', port=port)
