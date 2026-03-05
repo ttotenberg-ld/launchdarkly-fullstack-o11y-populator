@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
-from shared.error_injection import get_injected_error, InjectedError
+
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -121,10 +121,6 @@ def search():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/search')
-        if _err:
-            raise _err
-        
         data = request.get_json() or {}
         query = data.get('query', '').lower()
         category = data.get('category')
@@ -185,10 +181,6 @@ def query():
     with start_span('search.alternative_query') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        _err = get_injected_error(SERVICE_NAME, '/query')
-        if _err:
-            raise _err
         
         data = request.get_json() or {}
         query_string = data.get('q', '')

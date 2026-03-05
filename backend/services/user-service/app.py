@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_user_by_key, USER_PERSONAS
-from shared.error_injection import get_injected_error, InjectedError
+
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -110,10 +110,6 @@ def get_user(user_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('user_id', user_id)
         
-        _err = get_injected_error(SERVICE_NAME, '/users')
-        if _err:
-            raise _err
-
         # Simulate database lookup
         time.sleep(0.15)
         
@@ -156,10 +152,6 @@ def update_user(user_id):
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('user_id', user_id)
-
-        _err = get_injected_error(SERVICE_NAME, '/users')
-        if _err:
-            raise _err
 
         data = request.get_json() or {}
 
@@ -207,10 +199,6 @@ def get_preferences(user_id):
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/users')
-        if _err:
-            raise _err
-
         time.sleep(0.1)
 
         return jsonify({
@@ -236,10 +224,6 @@ def update_preferences(user_id):
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/users')
-        if _err:
-            raise _err
-
         data = request.get_json() or {}
         time.sleep(0.15)
         
@@ -261,10 +245,6 @@ def get_current_profile():
     with start_span('user.profile.current') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        _err = get_injected_error(SERVICE_NAME, '/profile')
-        if _err:
-            raise _err
         
         # Get a random user to simulate current session
         import random

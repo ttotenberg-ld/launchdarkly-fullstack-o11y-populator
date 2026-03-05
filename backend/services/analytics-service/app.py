@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
-from shared.error_injection import get_injected_error, InjectedError
+
 
 # Load environment variables
 load_dotenv()
@@ -78,10 +78,6 @@ def track_event():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/track')
-        if _err:
-            raise _err
-        
         data = request.get_json() or {}
         event_name = data.get('event', 'unknown_event')
         user = data.get('user', {})
@@ -123,10 +119,6 @@ def track_batch():
     with start_span('analytics.track_batch') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        _err = get_injected_error(SERVICE_NAME, '/events')
-        if _err:
-            raise _err
         
         data = request.get_json() or {}
         events = data.get('events', [])

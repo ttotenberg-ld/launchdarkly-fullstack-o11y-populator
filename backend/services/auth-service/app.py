@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user, get_user_by_key
-from shared.error_injection import get_injected_error, InjectedError
+
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -110,10 +110,6 @@ def login():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/login')
-        if _err:
-            raise _err
-        
         data = request.get_json() or {}
         user = data.get('user', get_random_user())
         
@@ -162,10 +158,6 @@ def validate_token():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        _err = get_injected_error(SERVICE_NAME, '/validate')
-        if _err:
-            raise _err
-        
         data = request.get_json() or {}
         token = data.get('token', '')
         
@@ -196,10 +188,6 @@ def refresh_token():
     with start_span('auth.refresh') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        _err = get_injected_error(SERVICE_NAME, '/refresh')
-        if _err:
-            raise _err
         
         data = request.get_json() or {}
         old_token = data.get('token', '')
