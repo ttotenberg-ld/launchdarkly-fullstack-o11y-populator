@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user, get_user_context
-from shared.error_injection import maybe_raise_error, InjectedError
+from shared.error_injection import get_injected_error, InjectedError
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -118,7 +118,9 @@ def login():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/login')
+        _err = get_injected_error(SERVICE_NAME, '/api/login')
+        if _err:
+            raise _err
         
         user = get_random_user()
         data = request.get_json() or {}
@@ -141,8 +143,10 @@ def get_user(user_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('user_id', user_id)
         
-        maybe_raise_error(SERVICE_NAME, '/api/users')
-        
+        _err = get_injected_error(SERVICE_NAME, '/api/users')
+        if _err:
+            raise _err
+
         record_log(f"Fetching user profile for {user_id}", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, f'/api/users/{user_id}'),
             'user_id': user_id,
@@ -160,8 +164,10 @@ def update_user(user_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('user_id', user_id)
         
-        maybe_raise_error(SERVICE_NAME, '/api/users')
-        
+        _err = get_injected_error(SERVICE_NAME, '/api/users')
+        if _err:
+            raise _err
+
         data = request.get_json() or {}
         
         record_log(f"Updating user profile for {user_id}", LEVELS['info'], {
@@ -180,7 +186,9 @@ def checkout():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/checkout')
+        _err = get_injected_error(SERVICE_NAME, '/api/checkout')
+        if _err:
+            raise _err
         
         user = get_random_user()
         data = request.get_json() or {}
@@ -203,7 +211,9 @@ def list_orders():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/orders')
+        _err = get_injected_error(SERVICE_NAME, '/api/orders')
+        if _err:
+            raise _err
         
         result = call_service('order-service', '/orders')
         return jsonify(result)
@@ -216,7 +226,9 @@ def search():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/search')
+        _err = get_injected_error(SERVICE_NAME, '/api/search')
+        if _err:
+            raise _err
         
         data = request.get_json() or {}
         query = data.get('query', '')
@@ -237,8 +249,10 @@ def list_products():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/products')
-        
+        _err = get_injected_error(SERVICE_NAME, '/api/products')
+        if _err:
+            raise _err
+
         result = call_service('inventory-service', '/products')
         return jsonify(result)
 
@@ -251,8 +265,10 @@ def get_product(product_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('product_id', product_id)
         
-        maybe_raise_error(SERVICE_NAME, '/api/products')
-        
+        _err = get_injected_error(SERVICE_NAME, '/api/products')
+        if _err:
+            raise _err
+
         result = call_service('inventory-service', f'/products/{product_id}')
         return jsonify(result)
 
@@ -264,7 +280,9 @@ def dashboard():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/api/dashboard')
+        _err = get_injected_error(SERVICE_NAME, '/api/dashboard')
+        if _err:
+            raise _err
         
         record_log("Dashboard data requested", LEVELS['info'], 
                    get_common_attributes(SERVICE_NAME, '/api/dashboard'))

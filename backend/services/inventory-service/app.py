@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
-from shared.error_injection import maybe_raise_error, InjectedError
+from shared.error_injection import get_injected_error, InjectedError
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -122,8 +122,10 @@ def list_products():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/products')
-        
+        _err = get_injected_error(SERVICE_NAME, '/products')
+        if _err:
+            raise _err
+
         # Simulate database query
         time.sleep(0.15)
         
@@ -149,8 +151,10 @@ def get_product(product_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('product_id', product_id)
         
-        maybe_raise_error(SERVICE_NAME, '/products')
-        
+        _err = get_injected_error(SERVICE_NAME, '/products')
+        if _err:
+            raise _err
+
         time.sleep(0.1)
         
         product = PRODUCTS.get(product_id)
@@ -180,8 +184,10 @@ def check_stock():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/check')
-        
+        _err = get_injected_error(SERVICE_NAME, '/check')
+        if _err:
+            raise _err
+
         data = request.get_json() or {}
         items = data.get('items', [])
         
@@ -225,8 +231,10 @@ def reserve_stock():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/reserve')
-        
+        _err = get_injected_error(SERVICE_NAME, '/reserve')
+        if _err:
+            raise _err
+
         data = request.get_json() or {}
         order_id = data.get('order_id', f"ord_{uuid.uuid4().hex[:12]}")
         items = data.get('items', [])

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user
-from shared.error_injection import maybe_raise_error, InjectedError
+from shared.error_injection import get_injected_error, InjectedError
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -120,8 +120,10 @@ def checkout():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/checkout')
-        
+        _err = get_injected_error(SERVICE_NAME, '/checkout')
+        if _err:
+            raise _err
+
         data = request.get_json() or {}
         user = data.get('user', get_random_user())
         items = data.get('items', random.sample(PRODUCTS, k=random.randint(1, 3)))
@@ -243,8 +245,10 @@ def list_orders():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/orders')
-        
+        _err = get_injected_error(SERVICE_NAME, '/orders')
+        if _err:
+            raise _err
+
         # Simulate database query
         time.sleep(0.2)
         
@@ -280,8 +284,10 @@ def get_order(order_id):
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('order_id', order_id)
         
-        maybe_raise_error(SERVICE_NAME, '/orders')
-        
+        _err = get_injected_error(SERVICE_NAME, '/orders')
+        if _err:
+            raise _err
+
         time.sleep(0.1)
         
         user = get_random_user()

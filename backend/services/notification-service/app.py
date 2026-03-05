@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
-from shared.error_injection import maybe_raise_error, InjectedError
+from shared.error_injection import get_injected_error, InjectedError
 
 # Load environment variables
 load_dotenv()
@@ -106,7 +106,9 @@ def send_notification():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/send')
+        _err = get_injected_error(SERVICE_NAME, '/send')
+        if _err:
+            raise _err
         
         data = request.get_json() or {}
         notification_type = data.get('type', 'email')
@@ -158,7 +160,9 @@ def send_email():
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         
-        maybe_raise_error(SERVICE_NAME, '/email')
+        _err = get_injected_error(SERVICE_NAME, '/email')
+        if _err:
+            raise _err
         
         data = request.get_json() or {}
         to = data.get('to', 'user@example.com')

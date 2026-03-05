@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
-from shared.error_injection import maybe_raise_error, InjectedError
+from shared.error_injection import get_injected_error, InjectedError
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -111,7 +111,9 @@ def process_payment():
         span.set_attribute('service', SERVICE_NAME)
         
         # This is where errors are often injected in the trace chain
-        maybe_raise_error(SERVICE_NAME, '/process')
+        _err = get_injected_error(SERVICE_NAME, '/process')
+        if _err:
+            raise _err
         
         data = request.get_json() or {}
         order_id = data.get('order_id', f"ord_{uuid.uuid4().hex[:12]}")
@@ -139,7 +141,9 @@ def process_payment():
             val_span.set_attribute('service', SERVICE_NAME)
             val_span.set_attribute('step', 'validate_card')
             
-            maybe_raise_error(SERVICE_NAME, '/validate')
+            _err = get_injected_error(SERVICE_NAME, '/validate')
+            if _err:
+                raise _err
             
             # Simulate card validation
             time.sleep(0.3)

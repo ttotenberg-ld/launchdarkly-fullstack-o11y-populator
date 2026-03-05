@@ -1,17 +1,13 @@
 /**
  * ErrorInjector - A component that may inject errors during React's render cycle.
- * 
- * This component is designed for observability demo purposes. It randomly throws
- * errors during initial render to simulate real-world error scenarios that will
- * be captured by LaunchDarkly Observability.
- * 
- * The errors thrown here will:
- * 1. Be captured by the auto-instrumentation (window.onerror)
- * 2. Be caught by React Error Boundary (if one exists)
- * 3. Appear on the documentLoad span with has_errors=true
+ *
+ * Render-phase errors are thrown and caught by the ErrorBoundary, which calls
+ * LDObserve.recordError(). Async errors are recorded directly via LDObserve.recordError()
+ * to match the reference implementation's pattern.
  */
 
 import { useEffect, useRef } from 'react';
+import { LDObserve } from '@launchdarkly/observability';
 
 // Configuration
 const ERROR_INJECTION_RATE = parseFloat(import.meta.env.VITE_ERROR_INJECTION_RATE || '0.05');
@@ -37,8 +33,8 @@ function shouldInjectRenderError() {
   if (sessionWillHaveRenderError === null) {
     // Only inject render errors in ~50% of error sessions
     // (the other 50% get load errors from the main.jsx initialization)
-    sessionWillHaveRenderError = 
-      ERROR_INJECTION_ENABLED && 
+    sessionWillHaveRenderError =
+      ERROR_INJECTION_ENABLED &&
       Math.random() < ERROR_INJECTION_RATE * 0.5;
   }
   return sessionWillHaveRenderError;
@@ -50,28 +46,38 @@ function shouldInjectRenderError() {
 export default function ErrorInjector() {
   const hasInjected = useRef(false);
 
-  // Only check on first mount
+  // Only check on first mount — throw during render so ErrorBoundary catches it
+  // and calls LDObserve.recordError() in componentDidCatch
   if (!hasInjected.current && shouldInjectRenderError()) {
     hasInjected.current = true;
-    
+
     // Pick a random error
     const errorCreator = RENDER_ERRORS[Math.floor(Math.random() * RENDER_ERRORS.length)];
     const error = errorCreator();
-    
+
     console.warn('[ErrorInjector] Throwing render-phase error:', error.message);
     throw error;
   }
 
-  // Also inject async errors occasionally
+  // Also record async errors directly via LDObserve.recordError()
   useEffect(() => {
     if (ERROR_INJECTION_ENABLED && Math.random() < ERROR_INJECTION_RATE * 0.3) {
-      // Inject an unhandled promise rejection
       const error = new Error('Async operation failed unexpectedly');
       error.name = 'AsyncOperationError';
-      
+
       setTimeout(() => {
-        console.warn('[ErrorInjector] Injecting async error:', error.message);
-        Promise.reject(error);
+        try {
+          LDObserve.recordError(error, 'Frontend: Async operation error', {
+            source: 'frontend',
+            service: 'react-frontend',
+            component: 'ErrorInjector',
+            errorType: 'AsyncOperationError',
+            demo_type: 'injected_async_error'
+          });
+          console.warn('[ErrorInjector] Recorded async error via LDObserve.recordError():', error.message);
+        } catch (e) {
+          console.error('[ErrorInjector] Failed to record async error:', e);
+        }
       }, Math.random() * 2000); // Random delay within first 2 seconds
     }
   }, []);

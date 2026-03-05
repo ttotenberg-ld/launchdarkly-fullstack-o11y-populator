@@ -234,13 +234,30 @@ def get_error_for_service(
     return None
 
 
+def get_injected_error(service_name: str, endpoint: str = "*") -> Optional[InjectedError]:
+    """
+    Get an error to inject, or None if no error should be injected.
+    Caller raises the returned error to get a realistic stack trace
+    originating from the service's own code.
+
+    Usage:
+        _err = get_injected_error(SERVICE_NAME, '/process')
+        if _err:
+            raise _err
+    """
+    error_info = get_error_for_service(service_name, endpoint)
+    if error_info:
+        error_class, message, status_code = error_info
+        return InjectedError(message, error_class, status_code)
+    return None
+
+
 def maybe_raise_error(service_name: str, endpoint: str = "*") -> None:
     """
     Possibly raise an injected error based on configured rates.
-    Use this at the start of endpoint handlers.
+
+    Deprecated: Use get_injected_error() instead for realistic stack traces.
     """
-    error_info = get_error_for_service(service_name, endpoint)
-    
-    if error_info:
-        error_class, message, status_code = error_info
-        raise InjectedError(message, error_class, status_code)
+    _err = get_injected_error(service_name, endpoint)
+    if _err:
+        raise _err
