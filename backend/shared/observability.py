@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 import ldclient
+from ldclient import Context
 from ldclient.config import Config
 from ldobserve import ObservabilityConfig, ObservabilityPlugin
 
@@ -135,6 +136,15 @@ def setup_flask_instrumentation(app):
     RequestsInstrumentor().instrument()
     
     print("  ✓ Flask and requests instrumentation enabled")
+
+
+def build_service_context(service_name: str) -> Context:
+    """
+    Build a LaunchDarkly context representing a backend service.
+    Use this for service-level flag evaluations (e.g. migration rollouts)
+    where the targeting unit is the service itself, not an end user.
+    """
+    return Context.builder(service_name).kind("service").name(service_name).build()
 
 
 def get_common_attributes(service_name: str, endpoint: str = None) -> dict:

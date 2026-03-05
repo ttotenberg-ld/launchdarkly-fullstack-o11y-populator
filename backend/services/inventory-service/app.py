@@ -6,14 +6,12 @@ This service simulates a warehouse API v2 migration gone wrong. Error
 injection is isolated here to create a clear service map where one leaf
 service is the obvious error source.
 
-Architecture note: error injection is gated behind `should_use_unstable_api()`.
-To integrate a LaunchDarkly feature flag, replace that function body with:
-
-    return ld_client.variation("warehouse-api-migration", context, False)
+Architecture note: error injection is gated behind `should_use_unstable_api()`,
+which evaluates the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
 The flag controls two variations:
-  - "stable" (old warehouse API): no errors injected
-  - "unstable" (new warehouse API v2): errors at configured rates
+  - True  / "Unstable (v2)": use the new warehouse API (errors at configured rates)
+  - False / "Stable (legacy)": use the legacy warehouse API (no errors injected)
 """
 
 import os
@@ -31,7 +29,8 @@ from ldobserve.observe import record_log, record_exception, start_span, LEVELS
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
+from shared.observability import create_ld_client, build_service_context, get_common_attributes, setup_flask_instrumentation
+from ldclient import Context
 from shared.service_names import get_service_url
 
 # Load environment variables
@@ -70,16 +69,36 @@ class WarehouseAPIError(Exception):
         self.status_code = status_code
 
 
+def build_evaluation_context() -> Context:
+    """
+    Build a multi-context for flag evaluations combining an ephemeral
+    per-request context with the stable service context.  The request
+    context is anonymous and keyed by a UUID so every evaluation is
+    unique, giving higher-cardinality data in LD.
+    """
+    request_context = Context.builder(str(uuid.uuid4())) \
+        .kind("request") \
+        .set("timestamp", time.time()) \
+        .set("endpoint", request.path) \
+        .set("method", request.method) \
+        .set("anonymous", True) \
+        .build()
+
+    service_context = build_service_context(SERVICE_NAME)
+
+    return Context.create_multi(request_context, service_context)
+
+
 def should_use_unstable_api() -> bool:
     """
-    Determine whether this request should use the "unstable" code path.
+    Determine whether this request should use the "unstable" code path,
+    controlled by the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
-    Currently always returns True (all inventory requests use the new API).
-    Replace this with a LaunchDarkly flag evaluation to control the rollout:
-
-        return client.variation("warehouse-api-migration", context, False)
+    When the flag is on (True): requests use the new Warehouse API v2 (errors may be injected).
+    When the flag is off (False): requests use the stable legacy path (no error injection).
     """
-    return True
+    context = build_evaluation_context()
+    return client.variation("migrate-warehouse-api", context, False)
 
 
 # Error scenarios for the warehouse API v2 migration.
@@ -124,6 +143,13 @@ WAREHOUSE_V2_ERRORS = [
 ]
 
 
+def _scenario_matches_endpoint(scenario: dict, endpoint: str) -> bool:
+    endpoints = scenario["endpoints"]
+    if "*" in endpoints:
+        return True
+    return any(endpoint.startswith(ep) for ep in endpoints)
+
+
 def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
     """
     Check if a warehouse API v2 error should be injected for this request.
@@ -136,11 +162,7 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
         return None
 
     for scenario in WAREHOUSE_V2_ERRORS:
-        # Check if this scenario applies to the current endpoint
-        endpoints = scenario["endpoints"]
-        if "*" not in endpoints and not any(
-            endpoint.startswith(ep) for ep in endpoints
-        ):
+        if not _scenario_matches_endpoint(scenario, endpoint):
             continue
 
         # Roll the dice
