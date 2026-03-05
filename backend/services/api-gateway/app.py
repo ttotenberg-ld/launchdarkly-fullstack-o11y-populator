@@ -33,16 +33,18 @@ client = create_ld_client(SERVICE_NAME, SERVICE_VERSION)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-Type', 'traceparent', 'tracestate'])
+USER_HEADERS = ['X-User-Key', 'X-User-Name', 'X-User-Email', 'X-User-Plan', 'X-User-Role', 'X-User-Metro', 'X-User-Country']
+CORS(app, expose_headers=['traceparent', 'tracestate'],
+     allow_headers=['Content-Type', 'traceparent', 'tracestate'] + USER_HEADERS)
 
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
 
 
 def get_trace_headers():
-    """Extract trace context headers from the incoming request."""
+    """Extract trace context and user context headers from the incoming request."""
     headers = {}
-    for key in ['traceparent', 'tracestate']:
+    for key in ['traceparent', 'tracestate'] + USER_HEADERS:
         if key in request.headers:
             headers[key] = request.headers[key]
     return headers

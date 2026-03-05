@@ -50,10 +50,12 @@ PRODUCTS = [
 ]
 
 
+USER_HEADERS = ['X-User-Key', 'X-User-Name', 'X-User-Email', 'X-User-Plan', 'X-User-Role', 'X-User-Metro', 'X-User-Country']
+
 def get_trace_headers():
-    """Extract trace context headers."""
+    """Extract trace context and user context headers."""
     headers = {}
-    for key in ['traceparent', 'tracestate']:
+    for key in ['traceparent', 'tracestate'] + USER_HEADERS:
         if key in request.headers:
             headers[key] = request.headers[key]
     return headers

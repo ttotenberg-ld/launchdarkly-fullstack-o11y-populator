@@ -69,13 +69,55 @@ class WarehouseAPIError(Exception):
         self.status_code = status_code
 
 
+def _build_user_context() -> Optional[Context]:
+    """
+    Extract the frontend user from X-User-* headers and return a user
+    context, or None when headers are absent (e.g. health checks).
+    """
+    user_key = request.headers.get('X-User-Key')
+    if not user_key:
+        return None
+
+    builder = Context.builder(user_key).kind("user")
+
+    name = request.headers.get('X-User-Name')
+    if name:
+        builder.name(name)
+
+    for header, attr in [
+        ('X-User-Email', 'email'),
+        ('X-User-Plan', 'plan'),
+        ('X-User-Role', 'role'),
+        ('X-User-Metro', 'metro'),
+        ('X-User-Country', 'country'),
+    ]:
+        value = request.headers.get(header)
+        if value:
+            builder.set(attr, value)
+
+    return builder.build()
+
+
 def build_evaluation_context() -> Context:
     """
-    Build a multi-context for flag evaluations combining an ephemeral
-    per-request context with the stable service context.  The request
-    context is anonymous and keyed by a UUID so every evaluation is
-    unique, giving higher-cardinality data in LD.
+    Build a multi-context for flag evaluations combining up to three kinds:
+      - user    : the end-user from the frontend (via X-User-* headers)
+      - request : an ephemeral anonymous context unique to each evaluation
+      - service : the stable service identity
     """
+    user_context = _build_user_context()
+
+    if not user_context:
+        record_log(
+            "No X-User-* headers on request — user context omitted from multi-context",
+            LEVELS['warning'],
+            {
+                **get_common_attributes(SERVICE_NAME, request.path),
+                'method': request.method,
+                'has_x_user_key': 'X-User-Key' in request.headers,
+            },
+        )
+
     request_context = Context.builder(str(uuid.uuid4())) \
         .kind("request") \
         .set("timestamp", time.time()) \
@@ -86,6 +128,8 @@ def build_evaluation_context() -> Context:
 
     service_context = build_service_context(SERVICE_NAME)
 
+    if user_context:
+        return Context.create_multi(user_context, request_context, service_context)
     return Context.create_multi(request_context, service_context)
 
 
@@ -98,7 +142,43 @@ def should_use_unstable_api() -> bool:
     When the flag is off (False): requests use the stable legacy path (no error injection).
     """
     context = build_evaluation_context()
-    return client.variation("migrate-warehouse-api", context, False)
+
+    flag_key = "migrate-warehouse-api"
+    context_kinds = []
+    for kind in ["user", "request", "service"]:
+        if context.get_individual_context(kind) is not None:
+            context_kinds.append(kind)
+
+    record_log(
+        f"Evaluating flag '{flag_key}'",
+        LEVELS['debug'],
+        {
+            **get_common_attributes(SERVICE_NAME, request.path),
+            'flag.key': flag_key,
+            'ld.context.kinds': str(context_kinds),
+            'ld.client.initialized': client.is_initialized(),
+        },
+    )
+
+    detail = client.variation_detail(flag_key, context, False)
+    flag_value = detail.value
+    reason = detail.reason
+
+    record_log(
+        f"Flag '{flag_key}' evaluated to {flag_value}",
+        LEVELS['info'],
+        {
+            **get_common_attributes(SERVICE_NAME, request.path),
+            'flag.key': flag_key,
+            'flag.value': flag_value,
+            'flag.reason.kind': reason.get('kind') if reason else 'unknown',
+            'flag.reason': str(reason),
+            'flag.variation_index': detail.variation_index,
+            'ld.client.initialized': client.is_initialized(),
+        },
+    )
+
+    return flag_value
 
 
 # Error scenarios for the warehouse API v2 migration.
@@ -158,7 +238,19 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
     or None if the request should proceed normally. The caller raises the
     returned error so the stack trace points to the service's own route handler.
     """
-    if not should_use_unstable_api():
+    use_unstable = should_use_unstable_api()
+    record_log(
+        f"Warehouse API path decision for {endpoint}: {'v2 (unstable)' if use_unstable else 'legacy (stable)'}",
+        LEVELS['info'],
+        {
+            **get_common_attributes(SERVICE_NAME, endpoint),
+            'flag.key': 'migrate-warehouse-api',
+            'flag.value': use_unstable,
+            'warehouse.api_version': 'v2' if use_unstable else 'legacy',
+        },
+    )
+
+    if not use_unstable:
         return None
 
     for scenario in WAREHOUSE_V2_ERRORS:
@@ -196,10 +288,12 @@ PRODUCTS = {
 # HELPERS
 # ============================================================================
 
+USER_HEADERS = ['X-User-Key', 'X-User-Name', 'X-User-Email', 'X-User-Plan', 'X-User-Role', 'X-User-Metro', 'X-User-Country']
+
 def get_trace_headers():
-    """Extract trace context headers."""
+    """Extract trace context and user context headers."""
     headers = {}
-    for key in ['traceparent', 'tracestate']:
+    for key in ['traceparent', 'tracestate'] + USER_HEADERS:
         if key in request.headers:
             headers[key] = request.headers[key]
     return headers

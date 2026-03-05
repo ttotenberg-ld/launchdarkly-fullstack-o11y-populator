@@ -32,8 +32,7 @@ import {
       clientSideID,
       context: {
         kind: 'user',
-        key: 'anonymous-' + Math.random().toString(36).substr(2, 9),
-        anonymous: true
+        key: Math.random().toString(36).substr(2, 9)
       },
       options: {
         plugins: [

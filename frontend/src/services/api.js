@@ -2,23 +2,32 @@
  * API service with trace context propagation for LaunchDarkly Observability.
  */
 
+import { faker } from '@faker-js/faker';
+
 // Use VITE_API_URL if set, otherwise use empty string for relative URLs
 // (nginx will proxy /api/* to the api-gateway)
 const API_URL = import.meta.env.VITE_API_URL ?? '';
 
-// User personas with LaunchDarkly pun emails
-const USER_PERSONAS = [
-  { key: 'usr_001', name: 'Luna Darksworth', email: 'luna@staylightly.io' },
-  { key: 'usr_002', name: 'Lance Dimly', email: 'lance@darklaunchly.com' },
-  { key: 'usr_003', name: 'Darcy Launch', email: 'darcy@lunchdarkly.net' },
-  { key: 'usr_004', name: 'Larry Duskman', email: 'larry@launchdorkly.io' },
-  { key: 'usr_005', name: 'Lydia Twilight', email: 'lydia@dimlylaunch.com' },
-  { key: 'usr_006', name: 'Drake Moonson', email: 'drake@launchbrightly.io' },
-  { key: 'usr_007', name: 'Dawn Flagworth', email: 'dawn@toggledarkly.com' },
-  { key: 'usr_008', name: 'Felix Feature', email: 'felix@flaglaunchly.io' },
-  { key: 'usr_009', name: 'Sage Rollout', email: 'sage@rolldarkly.net' },
-  { key: 'usr_010', name: 'Nova Experiment', email: 'nova@launchsoftly.io' },
-];
+const PLANS = ['free', 'silver', 'gold', 'platinum', 'diamond'];
+const ROLES = ['reader', 'writer', 'admin'];
+const METROS = ['New York', 'Chicago', 'Minneapolis', 'Atlanta', 'Los Angeles', 'San Francisco', 'Denver', 'Boston'];
+
+/**
+ * Generate a UUID v4.  crypto.randomUUID() requires a secure context
+ * (HTTPS / localhost).  The Playwright simulator hits the frontend over
+ * plain HTTP inside Docker, so we fall back to crypto.getRandomValues().
+ */
+function uuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // RFC-4122 v4 UUID via getRandomValues (works in all contexts)
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+  );
+}
+
+let _currentUser = null;
 
 // Sample products
 const PRODUCTS = [
@@ -30,10 +39,21 @@ const PRODUCTS = [
 ];
 
 /**
- * Get a random user persona.
+ * Generate a fresh random user with faker and store as the current user
+ * so downstream requests can attach their context as headers.
  */
 export function getRandomUser() {
-  return USER_PERSONAS[Math.floor(Math.random() * USER_PERSONAS.length)];
+  const user = {
+    key: `usr-${uuid()}`,
+    name: faker.person.fullName(),
+    email: faker.internet.email(),
+    plan: faker.helpers.arrayElement(PLANS),
+    role: faker.helpers.arrayElement(ROLES),
+    metro: faker.helpers.arrayElement(METROS),
+    country: faker.location.countryCode(),
+  };
+  _currentUser = user;
+  return user;
 }
 
 /**
@@ -60,14 +80,29 @@ export function getRandomCart() {
 
 /**
  * Make an API request with error handling.
+ * Attaches the current user's context as X-User-* headers so backend
+ * services can build rich LD multi-contexts without parsing the body.
  */
 async function request(path, options = {}) {
   const url = `${API_URL}${path}`;
-  
+
+  const userHeaders = {};
+  const user = _currentUser ?? getRandomUser();
+  if (user) {
+    userHeaders['X-User-Key'] = user.key;
+    userHeaders['X-User-Name'] = user.name;
+    userHeaders['X-User-Email'] = user.email;
+    if (user.plan) userHeaders['X-User-Plan'] = user.plan;
+    if (user.role) userHeaders['X-User-Role'] = user.role;
+    if (user.metro) userHeaders['X-User-Metro'] = user.metro;
+    if (user.country) userHeaders['X-User-Country'] = user.country;
+  }
+
   const config = {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...userHeaders,
       ...options.headers,
     },
   };
