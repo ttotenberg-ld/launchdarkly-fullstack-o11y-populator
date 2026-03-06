@@ -5,19 +5,8 @@ import Observability from '@launchdarkly/observability'
 import SessionReplay from '@launchdarkly/session-replay'
 import App from './App.jsx'
 import './index.css'
-import {
-  initializeErrorInjection,
-  setupDocumentLoadErrors,
-  registerDocumentLoadErrorProcessor,
-} from './utils/errorInjection'
 
 (async () => {
-  // Register documentLoad error handler BEFORE SDK initialization.
-  // Fallback mechanism: throws errors during the 'load' event. The SDK's
-  // window.onerror creates highlight.exception spans with timestamps that
-  // overlap the documentLoad time window (server-side time correlation).
-  setupDocumentLoadErrors();
-
   try {
     const clientSideID = import.meta.env.VITE_LD_CLIENT_SIDE_ID;
 
@@ -48,6 +37,7 @@ import {
         }),
       },
       options: {
+        sendEventsOnlyForVariation: false,
         plugins: [
           new Observability({
             version: '1.0.0',
@@ -65,20 +55,8 @@ import {
       }
     });
 
-    // PRIMARY: Register a custom OTel SpanProcessor that injects errors
-    // directly onto documentLoad spans when they're created. This must happen
-    // AFTER asyncWithLDProvider() is called (TracerProvider exists) but BEFORE
-    // the 'load' event fires (which triggers documentLoad span creation via
-    // a deferred setTimeout inside the SDK's _onDocumentLoaded).
-    registerDocumentLoadErrorProcessor();
-
     // Wait for the LD client to receive flag data
     const LDProvider = await providerPromise;
-
-    // Initialize post-load error injection after SDK is ready.
-    // These create session-level errors via LDObserve.recordError().
-    // (documentLoad errors are handled by the SpanProcessor above)
-    initializeErrorInjection();
 
     ReactDOM.createRoot(document.getElementById('root')).render(
       <React.StrictMode>

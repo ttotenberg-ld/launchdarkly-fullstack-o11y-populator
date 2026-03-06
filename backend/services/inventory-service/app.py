@@ -2,16 +2,17 @@
 Inventory Service - Stock management, reservations.
 Port: 5005
 
-This service simulates a warehouse API v2 migration gone wrong. Error
-injection is isolated here to create a clear service map where one leaf
-service is the obvious error source.
+This service simulates a warehouse API migration. Error injection is
+isolated here to create a clear service map where one leaf service is
+the obvious error source.
 
-Architecture note: error injection is gated behind `should_use_unstable_api()`,
+Architecture note: error injection is gated behind `get_warehouse_api_version()`,
 which evaluates the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
-The flag controls two variations:
-  - True  / "Unstable (v2)": use the new warehouse API (errors at configured rates)
-  - False / "Stable (legacy)": use the legacy warehouse API (no errors injected)
+The flag is multivariate (string) with three variations:
+  - "v1" / Stable legacy:       original warehouse API, no errors
+  - "v2" / Unstable migration:  new warehouse API v2, errors at configured rates
+  - "v3" / Stable (iterated):   v2 after stabilization, errors resolved
 """
 
 import os
@@ -133,13 +134,15 @@ def build_evaluation_context() -> Context:
     return Context.create_multi(request_context, service_context)
 
 
-def should_use_unstable_api() -> bool:
+def get_warehouse_api_version() -> str:
     """
-    Determine whether this request should use the "unstable" code path,
+    Determine which warehouse API version to use for this request,
     controlled by the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
-    When the flag is on (True): requests use the new Warehouse API v2 (errors may be injected).
-    When the flag is off (False): requests use the stable legacy path (no error injection).
+    Returns "v1", "v2", or "v3":
+      - "v1": stable legacy path (no error injection)
+      - "v2": unstable migration (errors injected at configured rates)
+      - "v3": stabilized v2 iteration (no error injection)
     """
     context = build_evaluation_context()
 
@@ -160,7 +163,7 @@ def should_use_unstable_api() -> bool:
         },
     )
 
-    detail = client.variation_detail(flag_key, context, False)
+    detail = client.variation_detail(flag_key, context, "v1")
     flag_value = detail.value
     reason = detail.reason
 
@@ -245,19 +248,20 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
     or None if the request should proceed normally. The caller raises the
     returned error so the stack trace points to the service's own route handler.
     """
-    use_unstable = should_use_unstable_api()
+    api_version = get_warehouse_api_version()
     record_log(
-        f"Warehouse API path decision for {endpoint}: {'v2 (unstable)' if use_unstable else 'legacy (stable)'}",
+        f"Warehouse API path decision for {endpoint}: {api_version}",
         LEVELS['info'],
         {
             **get_common_attributes(SERVICE_NAME, endpoint),
             'flag.key': 'migrate-warehouse-api',
-            'flag.value': use_unstable,
-            'warehouse.api_version': 'v2' if use_unstable else 'legacy',
+            'flag.value': api_version,
+            'warehouse.api_version': api_version,
         },
     )
 
-    if not use_unstable:
+    # Only v2 injects errors — v1 (legacy) and v3 (stabilized) are stable
+    if api_version != "v2":
         return None
 
     for scenario in WAREHOUSE_V2_ERRORS:
