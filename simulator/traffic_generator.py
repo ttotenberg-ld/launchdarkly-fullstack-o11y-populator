@@ -655,6 +655,36 @@ class TrafficGenerator:
             
             page = await context.new_page()
 
+            # --- Stealth: mask Playwright automation signals ---
+            # LD's session replay pipeline (powered by Highlight) filters
+            # sessions from automated/bot browsers.  We override the most
+            # common detection signals so sessions look like real users.
+            await page.add_init_script("""
+                // Hide navigator.webdriver flag
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => false,
+                    configurable: true,
+                });
+
+                // Provide realistic navigator.platform matching user-agent
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'MacIntel',
+                    configurable: true,
+                });
+
+                // Normal language list instead of POSIX locale
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                    configurable: true,
+                });
+
+                // Stub chrome.runtime so headless Chrome looks like desktop Chrome
+                if (!window.chrome) { window.chrome = {}; }
+                if (!window.chrome.runtime) {
+                    window.chrome.runtime = { id: undefined };
+                }
+            """)
+
             # Inject user identity into the page so the frontend uses the
             # same user for both LD client-side context and X-User-* headers.
             # add_init_script runs before any page scripts on every navigation.
@@ -719,13 +749,21 @@ class TrafficGenerator:
         print(f"{'='*70}\n")
         
         async with async_playwright() as p:
-            # Launch browser
-            self.browser = await p.chromium.launch(headless=True)
-            
+            # Launch browser with stealth flags to avoid bot detection.
+            # LD's session replay pipeline (via Highlight) filters sessions
+            # from automated browsers, so we mask automation signals.
+            self.browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                ],
+            )
+
             # Create a persistent context for better session handling
             context = await self.browser.new_context(
                 viewport={'width': 1280, 'height': 720},
-                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='en-US',
             )
             
             # Track running session tasks
