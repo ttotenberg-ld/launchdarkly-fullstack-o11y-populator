@@ -43,6 +43,16 @@ const PRODUCTS = [
  * so downstream requests can attach their context as headers.
  */
 export function getRandomUser() {
+  // Use injected user identity from the simulator (set via Playwright's
+  // addInitScript as window.__LD_USER__). This keeps the same user key
+  // flowing through LD client-side context, X-User-* headers, and backend
+  // multi-context evaluations.
+  if (typeof window !== 'undefined' && window.__LD_USER__) {
+    _currentUser = window.__LD_USER__;
+    return _currentUser;
+  }
+
+  // Fallback: generate a fresh random user (local dev or autoplay mode)
   const user = {
     key: `usr-${uuid()}`,
     name: faker.person.fullName(),

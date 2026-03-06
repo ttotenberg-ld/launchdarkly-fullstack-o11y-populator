@@ -183,7 +183,9 @@ def should_use_unstable_api() -> bool:
 
 # Error scenarios for the warehouse API v2 migration.
 # Each scenario has a probability rate, the endpoints it affects,
-# and the error details that appear in traces/logs.
+# the error details that appear in traces/logs, and a latency range
+# (min_seconds, max_seconds) simulating the delay before the error
+# surfaces (e.g. timeouts take a long time, rate limits are fast).
 WAREHOUSE_V2_ERRORS = [
     {
         "rate": 0.06,
@@ -191,6 +193,7 @@ WAREHOUSE_V2_ERRORS = [
         "error_type": "WarehouseAPIv2TimeoutError",
         "message": "Warehouse API v2: request timed out after 10s (endpoint: /v2/inventory/query)",
         "status_code": 504,
+        "latency": (3.0, 8.0),
     },
     {
         "rate": 0.04,
@@ -198,6 +201,7 @@ WAREHOUSE_V2_ERRORS = [
         "error_type": "WarehouseAPIv2ResponseParseError",
         "message": "Warehouse API v2: unexpected response format — got 'available_qty' instead of 'quantity_on_hand'",
         "status_code": 500,
+        "latency": (0.5, 2.0),
     },
     {
         "rate": 0.02,
@@ -205,6 +209,7 @@ WAREHOUSE_V2_ERRORS = [
         "error_type": "WarehouseAPIv2AuthError",
         "message": "Warehouse API v2: authentication failed — API key rotation in progress",
         "status_code": 503,
+        "latency": (1.0, 3.0),
     },
     {
         "rate": 0.03,
@@ -212,6 +217,7 @@ WAREHOUSE_V2_ERRORS = [
         "error_type": "WarehouseAPIv2RateLimitError",
         "message": "Warehouse API v2: rate limit exceeded (100 req/min) — retry after 12s",
         "status_code": 429,
+        "latency": (0.2, 0.8),
     },
     {
         "rate": 0.03,
@@ -219,6 +225,7 @@ WAREHOUSE_V2_ERRORS = [
         "error_type": "StaleInventoryCacheError",
         "message": "Inventory cache invalidation failed — v2 cache key format mismatch",
         "status_code": 500,
+        "latency": (0.8, 2.5),
     },
 ]
 
@@ -259,6 +266,23 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
 
         # Roll the dice
         if random.random() < scenario["rate"]:
+            # Simulate realistic latency before the error surfaces.
+            # Timeouts take longer; rate limits are fast; parse errors
+            # happen after some processing time.
+            latency_range = scenario.get("latency", (0.1, 0.5))
+            latency = random.uniform(*latency_range)
+            record_log(
+                f"Warehouse API v2 error pending: {scenario['error_type']} "
+                f"(simulating {latency:.1f}s latency)",
+                LEVELS['debug'],
+                {
+                    **get_common_attributes(SERVICE_NAME, endpoint),
+                    'warehouse.error_type': scenario['error_type'],
+                    'warehouse.simulated_latency_s': round(latency, 2),
+                },
+            )
+            time.sleep(latency)
+
             return WarehouseAPIError(
                 message=scenario["message"],
                 error_type=scenario["error_type"],

@@ -25,6 +25,11 @@ import {
       throw new Error('LaunchDarkly client-side ID not found in environment variables. Please set VITE_LD_CLIENT_SIDE_ID in your .env file.');
     }
 
+    // Use injected user identity from simulator if available, otherwise
+    // generate a random key for local dev. This keeps the LD client-side
+    // context aligned with the X-User-* headers sent on API requests.
+    const ldUser = typeof window !== 'undefined' ? window.__LD_USER__ : null;
+
     // Start SDK initialization — this SYNCHRONOUSLY creates the OTel
     // TracerProvider and registers it globally, but the returned Promise
     // doesn't resolve until the LD client receives flag data via streaming.
@@ -32,7 +37,15 @@ import {
       clientSideID,
       context: {
         kind: 'user',
-        key: Math.random().toString(36).substr(2, 9)
+        key: ldUser?.key || Math.random().toString(36).substr(2, 9),
+        ...(ldUser && {
+          name: ldUser.name,
+          email: ldUser.email,
+          plan: ldUser.plan,
+          role: ldUser.role,
+          metro: ldUser.metro,
+          country: ldUser.country,
+        }),
       },
       options: {
         plugins: [

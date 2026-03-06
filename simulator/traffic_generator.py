@@ -14,6 +14,7 @@ import sys
 import random
 import asyncio
 import uuid
+import json
 import string
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -653,7 +654,13 @@ class TrafficGenerator:
             print(f"[{datetime.now().isoformat()}] Session {session_id} starting: {user['email']}")
             
             page = await context.new_page()
-            
+
+            # Inject user identity into the page so the frontend uses the
+            # same user for both LD client-side context and X-User-* headers.
+            # add_init_script runs before any page scripts on every navigation.
+            user_json = json.dumps(user)
+            await page.add_init_script(f"window.__LD_USER__ = {user_json};")
+
             try:
                 result = await self.scenario.execute(page, user)
                 result['session_id'] = session_id
