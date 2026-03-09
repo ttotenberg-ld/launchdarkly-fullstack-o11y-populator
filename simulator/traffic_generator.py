@@ -825,12 +825,9 @@ class TrafficGenerator:
             await page.route("**/events.launchdarkly.com/**", monitor_ld_events)
             self._log_session_key(user["key"], session_id)
 
-            # ---- Run the session with a hard timeout ----
+            # ---- Run the session (no force-kill — let it complete) ----
             result = None
-            timed_out = False
-
-            async def _session_body():
-                nonlocal result
+            try:
                 r = await self.scenario.execute(page, user)
                 r['session_id'] = session_id
                 # Flush events before close
@@ -843,31 +840,16 @@ class TrafficGenerator:
                 except Exception:
                     pass
                 result = r
-
-            try:
-                await asyncio.wait_for(_session_body(), timeout=SESSION_TIMEOUT)
-            except asyncio.TimeoutError:
-                timed_out = True
             except Exception as e:
                 self.error_count += 1
                 print(f"[{datetime.now().isoformat()}] Session {session_id} error: {e}")
             finally:
-                # Always close the page — this kills any stuck Playwright ops
                 try:
                     await page.close()
                 except Exception:
                     pass
 
             elapsed = (datetime.now() - start_time).total_seconds()
-
-            if timed_out:
-                self.error_count += 1
-                print(f"[{datetime.now().isoformat()}] Session {session_id} TIMEOUT after {elapsed:.1f}s")
-                return {
-                    'session_id': session_id, 'scenario': 'comprehensive_session',
-                    'user': user, 'error': f'timeout ({SESSION_TIMEOUT}s)',
-                    'timestamp': datetime.now().isoformat(),
-                }
 
             if result is None:
                 return {

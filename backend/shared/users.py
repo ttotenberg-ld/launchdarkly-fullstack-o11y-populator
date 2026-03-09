@@ -1,64 +1,94 @@
 """
 User generation for LaunchDarkly Observability Demo sessions.
 
-Generates unique users with UUID-based keys and rich metadata that flows
-consistently through the entire stack: simulator → frontend → backend.
+Generates unique users with UUID-based keys, Faker-generated names, and
+LD-themed email domains.  Every call to get_random_user() produces a
+virtually unique identity that flows consistently through the stack:
+simulator → frontend → backend.
 """
 
 import random
 import uuid
+
+from faker import Faker
 from ldclient import Context
+
+# Seeded separately from the global random so user generation is
+# reproducible within a process but still unique across processes.
+_fake = Faker()
+Faker.seed(None)  # entropy-seeded so each container gets different names
 
 # Attribute pools — match the frontend's api.js lists exactly
 PLANS = ['free', 'silver', 'gold', 'platinum', 'diamond']
 ROLES = ['reader', 'writer', 'admin']
-METROS = ['New York', 'Chicago', 'Minneapolis', 'Atlanta', 'Los Angeles', 'San Francisco', 'Denver', 'Boston']
+METROS = ['New York', 'Chicago', 'Minneapolis', 'Atlanta',
+          'Los Angeles', 'San Francisco', 'Denver', 'Boston']
 COUNTRIES = ['US', 'CA', 'GB', 'DE', 'FR', 'AU', 'JP', 'BR', 'IN', 'MX']
 
-# LaunchDarkly-punny name/email pool for flavor
-_NAME_POOL = [
-    {"name": "Luna Darksworth", "email": "luna@staylightly.io"},
-    {"name": "Lance Dimly", "email": "lance@darklaunchly.com"},
-    {"name": "Darcy Launch", "email": "darcy@lunchdarkly.net"},
-    {"name": "Larry Duskman", "email": "larry@launchdorkly.io"},
-    {"name": "Lydia Twilight", "email": "lydia@dimlylaunch.com"},
-    {"name": "Drake Moonson", "email": "drake@launchbrightly.io"},
-    {"name": "Dawn Flagworth", "email": "dawn@toggledarkly.com"},
-    {"name": "Felix Feature", "email": "felix@flaglaunchly.io"},
-    {"name": "Sage Rollout", "email": "sage@rolldarkly.net"},
-    {"name": "Nova Experiment", "email": "nova@launchsoftly.io"},
-    {"name": "River Toggle", "email": "river@darklylaunch.com"},
-    {"name": "Stella Variant", "email": "stella@launchquickly.io"},
-    {"name": "Atlas Segment", "email": "atlas@lightlylaunch.net"},
-    {"name": "Ivy Targeting", "email": "ivy@launchsnarkly.com"},
-    {"name": "Max Context", "email": "max@launchdimly.io"},
-    {"name": "Zara Percentage", "email": "zara@darklaunchery.net"},
-    {"name": "Quinn Prerequisite", "email": "quinn@launchduskly.com"},
-    {"name": "Blake Fallthrough", "email": "blake@dawnlaunchly.io"},
-    {"name": "Morgan Targeting", "email": "morgan@launchdaily.net"},
-    {"name": "Casey Killswitch", "email": "casey@featureflagly.com"},
+# LaunchDarkly-punny email domains for flavor
+_LD_DOMAINS = [
+    'launchdarkly.demo',
+    'darklylaunch.com',
+    'lunchdarkly.net',
+    'launchdorkly.io',
+    'dimlylaunch.com',
+    'launchbrightly.io',
+    'toggledarkly.com',
+    'flaglaunchly.io',
+    'rolldarkly.net',
+    'launchsoftly.io',
+    'launchquickly.io',
+    'lightlylaunch.net',
+    'launchsnarkly.com',
+    'launchdimly.io',
+    'darklaunchery.net',
+    'launchduskly.com',
+    'dawnlaunchly.io',
+    'launchdaily.net',
+    'featureflagly.com',
+    'staylightly.io',
+    'rolloutdark.com',
+    'nightlaunch.io',
+    'flaganddark.com',
+    'launchlightly.dev',
+    'darktoggle.net',
+    'switchdarkly.com',
+    'launchnebula.io',
+    'starlaunchly.com',
+    'moonlightflag.io',
+    'twilightlaunch.dev',
 ]
 
 # Backward-compatible static personas (deprecated — use get_random_user())
 USER_PERSONAS = [
-    {"key": f"usr_{i+1:03d}", **_NAME_POOL[i]}
-    for i in range(len(_NAME_POOL))
+    {
+        "key": f"usr_{i + 1:03d}",
+        "name": _fake.unique.name(),
+        "email": f"{_fake.unique.user_name()}@{random.choice(_LD_DOMAINS)}",
+    }
+    for i in range(20)
 ]
 
 
 def get_random_user() -> dict:
     """
-    Generate a user with a unique UUID key and random attributes.
+    Generate a user with a unique UUID key, Faker name, and LD-themed email.
 
     Each call produces a fresh user identity that matches the attribute
     schema expected by the frontend (plan, role, metro, country) and
     is consistent across the full request chain.
     """
-    persona = random.choice(_NAME_POOL)
+    first = _fake.first_name()
+    last = _fake.last_name()
+    name = f"{first} {last}"
+    # Build a username slug:  lowercase first + last-initial + short random
+    slug = f"{first.lower()}.{last.lower()}{random.randint(1, 999)}"
+    domain = random.choice(_LD_DOMAINS)
+
     return {
         "key": f"usr-{uuid.uuid4()}",
-        "name": persona["name"],
-        "email": persona["email"],
+        "name": name,
+        "email": f"{slug}@{domain}",
         "plan": random.choice(PLANS),
         "role": random.choice(ROLES),
         "metro": random.choice(METROS),

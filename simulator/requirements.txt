@@ -2,3 +2,4 @@ playwright>=1.40.0
 python-dotenv>=1.0.0
 launchdarkly-server-sdk>=9.12.0
 launchdarkly-observability>=0.1.0
+faker>=22.0.0
