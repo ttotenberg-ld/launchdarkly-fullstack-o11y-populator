@@ -199,7 +199,7 @@ services:
     restart: unless-stopped
 
   # Traffic Simulator (Browser-based with Playwright)
-  # Human-like sessions: ~30 seconds each, with typing, hesitation, and full endpoint coverage
+  # Human-like sessions: ~60 seconds each, with typing, hesitation, and full endpoint coverage
   simulator:
     build:
       context: .
@@ -208,7 +208,8 @@ services:
       - FRONTEND_URL=http://frontend:80
       - SESSIONS_PER_MINUTE=${SESSIONS_PER_MINUTE:-2}
       - MAX_CONCURRENT_BROWSERS=${MAX_CONCURRENT_BROWSERS:-3}
-      - TARGET_SESSION_DURATION=${TARGET_SESSION_DURATION:-30}
+      - TARGET_SESSION_DURATION=${TARGET_SESSION_DURATION:-60}
+      - SESSION_TIMEOUT=${SESSION_TIMEOUT:-90}
     volumes:
       - ./simulator/logs:/app/logs
     depends_on:

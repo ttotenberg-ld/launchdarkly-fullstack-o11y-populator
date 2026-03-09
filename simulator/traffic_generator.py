@@ -2,7 +2,7 @@
 Traffic Generator - Generates realistic browser-based traffic for LaunchDarkly observability demo.
 Uses Playwright for headless browser automation to generate real frontend sessions.
 
-Sessions are designed to be ~30 seconds long with human-like behavior:
+Sessions are designed to be ~60 seconds long with human-like behavior:
 - Hesitating before actions
 - Typing slowly with occasional typos and corrections
 - Clicking around and exploring pages
@@ -31,7 +31,8 @@ from shared.users import USER_PERSONAS, get_random_user
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 SESSIONS_PER_MINUTE = int(os.getenv('SESSIONS_PER_MINUTE', '2'))  # Fewer sessions since they're longer
 MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
-TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '30'))  # seconds
+TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '60'))  # seconds
+SESSION_TIMEOUT = int(os.getenv('SESSION_TIMEOUT', '90'))  # hard cap per session
 
 # Log file that records every user key that should have both a session
 # and flag evaluations.  Check this file to verify overlap in the LD dashboard.
@@ -161,7 +162,7 @@ class HumanClicker:
         """Hover over elements to simulate exploration."""
         elements = page.locator(selector)
         count = await elements.count()
-        
+
         if count > 0:
             # Hover over 1-3 random elements
             for _ in range(random.randint(1, min(3, count))):
@@ -172,11 +173,55 @@ class HumanClicker:
                 except:
                     pass
 
+    @staticmethod
+    async def simulate_mouse_movement(page: Page, steps: int = None):
+        """Generate realistic mouse movements so rrweb records MouseMove
+        IncrementalSnapshot events.  These are the 'timeline indicator
+        events' that LD's session pipeline checks for."""
+        if steps is None:
+            steps = random.randint(3, 6)
+        viewport = page.viewport_size or {'width': 1280, 'height': 720}
+        for _ in range(steps):
+            x = random.randint(50, viewport['width'] - 50)
+            y = random.randint(50, viewport['height'] - 50)
+            try:
+                await page.mouse.move(x, y, steps=random.randint(3, 8))
+                await asyncio.sleep(random.uniform(0.1, 0.4))
+            except Exception:
+                pass
+
+    @staticmethod
+    async def interact_idle(page: Page, duration: float = 2.0):
+        """Keep the page 'alive' with realistic idle interactions —
+        mouse drifts and occasional scrolls — for the given duration.
+        This ensures rrweb captures enough timeline events."""
+        end = asyncio.get_event_loop().time() + duration
+        viewport = page.viewport_size or {'width': 1280, 'height': 720}
+        while asyncio.get_event_loop().time() < end:
+            action = random.choices(
+                ['mouse', 'scroll', 'pause'],
+                weights=[0.5, 0.2, 0.3],
+            )[0]
+            try:
+                if action == 'mouse':
+                    x = random.randint(50, viewport['width'] - 50)
+                    y = random.randint(50, viewport['height'] - 50)
+                    await page.mouse.move(x, y, steps=random.randint(3, 8))
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+                elif action == 'scroll':
+                    delta = random.randint(50, 200) * random.choice([1, -1])
+                    await page.evaluate(f'window.scrollBy(0, {delta})')
+                    await asyncio.sleep(random.uniform(0.3, 0.7))
+                else:
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+            except Exception:
+                await asyncio.sleep(0.3)
+
 
 class ComprehensiveSessionScenario:
     """
     A comprehensive session that simulates a real user browsing the site.
-    Hits all backend endpoints during a ~30 second session.
+    Hits all backend endpoints during a ~60 second session.
     
     Endpoints to hit:
     - /api/health (via dashboard)
@@ -196,36 +241,45 @@ class ComprehensiveSessionScenario:
         self.endpoints_hit = set()
     
     async def execute(self, page: Page, user: dict) -> Dict[str, Any]:
-        """Execute a comprehensive user session."""
+        """Execute a comprehensive user session with a hard timeout."""
         results = []
         start_time = datetime.now()
         self.endpoints_hit = set()
-        
-        try:
+
+        async def _run_phases():
             # Phase 1: Initial landing and exploration
             await self._phase_landing(page, results)
-            
+
             # Phase 2: Browse products
             await self._phase_browse_products(page, results)
-            
+
             # Phase 3: Search for something
             await self._phase_search(page, results)
-            
+
             # Phase 4: Login
             await self._phase_login(page, user, results)
-            
+
             # Phase 5: View account/dashboard
             await self._phase_account(page, user, results)
-            
+
             # Phase 6: Add to cart and checkout
             await self._phase_checkout(page, user, results)
-            
-            # Phase 7: Final browsing/exploration
+
+            # Phase 7: Final browsing/exploration — fill up to target duration
             elapsed = (datetime.now() - start_time).total_seconds()
             remaining = max(0, self.target_duration - elapsed)
             if remaining > 3:
                 await self._phase_final_exploration(page, results, remaining)
-            
+
+        try:
+            await asyncio.wait_for(_run_phases(), timeout=SESSION_TIMEOUT)
+        except asyncio.TimeoutError:
+            results.append({
+                'action': 'session_timeout',
+                'success': False,
+                'error': f'Session exceeded {SESSION_TIMEOUT}s hard limit',
+                'phase': 'timeout',
+            })
         except Exception as e:
             results.append({
                 'action': 'session_error',
@@ -233,9 +287,9 @@ class ComprehensiveSessionScenario:
                 'error': str(e),
                 'phase': 'unknown'
             })
-        
+
         elapsed = (datetime.now() - start_time).total_seconds()
-        
+
         return {
             'scenario': self.name,
             'user': user,
@@ -248,19 +302,21 @@ class ComprehensiveSessionScenario:
     async def _phase_landing(self, page: Page, results: List[Dict]):
         """Land on homepage and look around."""
         # Navigate to home page
-        await page.goto(FRONTEND_URL, wait_until='domcontentloaded')
+        await page.goto(FRONTEND_URL, wait_until='domcontentloaded', timeout=15000)
         self.endpoints_hit.add('/api/health')
         results.append({'action': 'view_home', 'success': True, 'phase': 'landing'})
-        
-        # Take time to look at the homepage
-        await HumanTypist.read_page(2, 4)
-        
-        # Maybe scroll around
-        await HumanClicker.scroll_randomly(page, random.randint(1, 2))
-        
+
+        # Take time to look at the homepage — with idle interactions so
+        # rrweb records enough timeline events for LD's session filter.
+        await HumanClicker.interact_idle(page, random.uniform(3, 5))
+
+        # Scroll around and move mouse
+        await HumanClicker.scroll_randomly(page, random.randint(1, 3))
+        await HumanClicker.simulate_mouse_movement(page)
+
         # Hover over some navigation elements
         await HumanClicker.explore_hover(page, 'nav a, [data-testid*="nav"]')
-        
+
         await HumanTypist.hesitate(0.5, 1.5)
     
     async def _phase_browse_products(self, page: Page, results: List[Dict]):
@@ -270,21 +326,22 @@ class ComprehensiveSessionScenario:
             shop_btn = page.locator('[data-testid="shop-now-button"], a[href*="products"]')
             if await shop_btn.count() > 0:
                 await HumanClicker.click_with_hesitation(page, '[data-testid="shop-now-button"], a[href*="products"]')
-                await page.wait_for_load_state('domcontentloaded')
+                await page.wait_for_load_state('domcontentloaded', timeout=10000)
             else:
-                await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded')
-            
+                await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
+
             self.endpoints_hit.add('/api/products')
             results.append({'action': 'view_products_list', 'success': True, 'phase': 'browse'})
         except Exception as e:
-            await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded')
+            await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
             self.endpoints_hit.add('/api/products')
             results.append({'action': 'view_products_list', 'success': True, 'phase': 'browse', 'note': 'direct nav'})
         
-        # Take time to look at products
-        await HumanTypist.read_page(2, 4)
+        # Take time to look at products — with mouse movement
+        await HumanClicker.interact_idle(page, random.uniform(2, 4))
         await HumanClicker.scroll_randomly(page)
-        
+        await HumanClicker.simulate_mouse_movement(page)
+
         # Hover over some product cards
         await HumanClicker.explore_hover(page, '[data-testid="product-card"]')
         
@@ -305,13 +362,13 @@ class ComprehensiveSessionScenario:
                     self.endpoints_hit.add('/api/products/<id>')
                     results.append({'action': 'view_product_detail', 'success': True, 'phase': 'browse'})
                     
-                    # Read product details
-                    await HumanTypist.read_page(2, 5)
-                    await HumanClicker.scroll_randomly(page, random.randint(0, 2))
+                    # Read product details — with mouse interaction
+                    await HumanClicker.interact_idle(page, random.uniform(2, 5))
+                    await HumanClicker.scroll_randomly(page, random.randint(1, 3))
                     
                     # Go back to products list
                     await page.go_back()
-                    await page.wait_for_load_state('domcontentloaded')
+                    await page.wait_for_load_state('domcontentloaded', timeout=10000)
                     await HumanTypist.quick_glance()
                     
                 except Exception as e:
@@ -322,7 +379,7 @@ class ComprehensiveSessionScenario:
         """Search for products."""
         # Make sure we're on a page with search
         if '/products' not in page.url:
-            await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded')
+            await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
             await HumanTypist.quick_glance()
         
         # Find search input
@@ -388,14 +445,14 @@ class ComprehensiveSessionScenario:
         else:
             # Navigate with query parameter
             query = random.choice(SEARCH_QUERIES)[0]
-            await page.goto(f"{FRONTEND_URL}/products?q={query}", wait_until='domcontentloaded')
+            await page.goto(f"{FRONTEND_URL}/products?q={query}", wait_until='domcontentloaded', timeout=10000)
             self.endpoints_hit.add('/api/search')
             results.append({'action': 'search', 'query': query, 'success': True, 'phase': 'search', 'note': 'via url'})
             await HumanTypist.read_page(1, 2)
     
     async def _phase_login(self, page: Page, user: dict, results: List[Dict]):
         """Login to the account."""
-        await page.goto(f"{FRONTEND_URL}/login", wait_until='domcontentloaded')
+        await page.goto(f"{FRONTEND_URL}/login", wait_until='domcontentloaded', timeout=10000)
         results.append({'action': 'view_login', 'success': True, 'phase': 'login'})
         await HumanTypist.read_page(1, 2)
         
@@ -446,11 +503,12 @@ class ComprehensiveSessionScenario:
         """View account and dashboard."""
         # Try to access account page
         try:
-            await page.goto(f"{FRONTEND_URL}/account", wait_until='domcontentloaded')
+            await page.goto(f"{FRONTEND_URL}/account", wait_until='domcontentloaded', timeout=10000)
             self.endpoints_hit.add('/api/users/<user_id>')
             results.append({'action': 'view_account', 'success': True, 'phase': 'account'})
-            await HumanTypist.read_page(2, 4)
-            await HumanClicker.scroll_randomly(page, random.randint(0, 2))
+            await HumanClicker.interact_idle(page, random.uniform(2, 4))
+            await HumanClicker.scroll_randomly(page, random.randint(1, 3))
+            await HumanClicker.simulate_mouse_movement(page)
         except Exception as e:
             results.append({'action': 'view_account', 'success': False, 'error': str(e), 'phase': 'account'})
         
@@ -460,10 +518,10 @@ class ComprehensiveSessionScenario:
             dashboard_link = page.locator('[data-testid="dashboard-link"], a[href*="dashboard"]')
             if await dashboard_link.count() > 0:
                 await HumanClicker.click_with_hesitation(page, '[data-testid="dashboard-link"], a[href*="dashboard"]')
-                await page.wait_for_load_state('domcontentloaded')
+                await page.wait_for_load_state('domcontentloaded', timeout=10000)
             else:
                 # Navigate directly
-                await page.goto(f"{FRONTEND_URL}/dashboard", wait_until='domcontentloaded')
+                await page.goto(f"{FRONTEND_URL}/dashboard", wait_until='domcontentloaded', timeout=10000)
             
             self.endpoints_hit.add('/api/dashboard')
             results.append({'action': 'view_dashboard', 'success': True, 'phase': 'account'})
@@ -477,7 +535,7 @@ class ComprehensiveSessionScenario:
             orders_link = page.locator('[data-testid="orders-link"], a[href*="orders"]')
             if await orders_link.count() > 0:
                 await HumanClicker.click_with_hesitation(page, '[data-testid="orders-link"], a[href*="orders"]')
-                await page.wait_for_load_state('domcontentloaded')
+                await page.wait_for_load_state('domcontentloaded', timeout=10000)
                 self.endpoints_hit.add('/api/orders')
                 results.append({'action': 'view_orders', 'success': True, 'phase': 'account'})
                 await HumanTypist.read_page(1, 2)
@@ -487,9 +545,9 @@ class ComprehensiveSessionScenario:
     async def _phase_checkout(self, page: Page, user: dict, results: List[Dict]):
         """Add items to cart and go through checkout."""
         # Go back to products
-        await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded')
+        await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
         await HumanTypist.quick_glance()
-        
+
         # Click on a product
         product_cards = page.locator('[data-testid="product-card"]')
         if await product_cards.count() > 0:
@@ -518,7 +576,7 @@ class ComprehensiveSessionScenario:
             else:
                 await page.goto(f"{FRONTEND_URL}/cart", wait_until='domcontentloaded')
             
-            await page.wait_for_load_state('domcontentloaded')
+            await page.wait_for_load_state('domcontentloaded', timeout=10000)
             results.append({'action': 'view_cart', 'success': True, 'phase': 'checkout'})
             await HumanTypist.read_page(1, 2)
             
@@ -533,7 +591,7 @@ class ComprehensiveSessionScenario:
             if await checkout_btn.count() > 0:
                 await HumanTypist.hesitate(0.5, 1.5)
                 await checkout_btn.click()
-                await page.wait_for_load_state('domcontentloaded')
+                await page.wait_for_load_state('domcontentloaded', timeout=10000)
                 results.append({'action': 'start_checkout', 'success': True, 'phase': 'checkout'})
                 await HumanTypist.read_page(1, 2)
                 
@@ -608,28 +666,40 @@ class ComprehensiveSessionScenario:
         results.append({'action': 'fill_payment', 'success': True, 'phase': 'checkout'})
     
     async def _phase_final_exploration(self, page: Page, results: List[Dict], time_remaining: float):
-        """Use remaining time to explore more of the site."""
+        """Use remaining time to explore more of the site with rich
+        mouse/scroll interactions that rrweb records as timeline events."""
         actions_done = 0
-        max_actions = int(time_remaining / 3)  # Roughly 3 seconds per action
-        
+        max_actions = int(time_remaining / 4)  # ~4 seconds per action
+
         while actions_done < max_actions:
-            action = random.choice(['browse', 'scroll', 'navigate'])
-            
-            if action == 'browse':
-                await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded')
-                await HumanTypist.read_page(1, 2)
-                await HumanClicker.scroll_randomly(page)
-                
-            elif action == 'scroll':
-                await HumanClicker.scroll_randomly(page, random.randint(2, 4))
-                await HumanTypist.read_page(0.5, 1.5)
-                
-            elif action == 'navigate':
-                pages = ['/', '/products', '/cart', '/account']
-                target = random.choice(pages)
-                await page.goto(f"{FRONTEND_URL}{target}", wait_until='domcontentloaded')
-                await HumanTypist.read_page(1, 2)
-            
+            action = random.choice(['browse', 'scroll', 'navigate', 'interact'])
+
+            try:
+                if action == 'browse':
+                    await page.goto(f"{FRONTEND_URL}/products",
+                                    wait_until='domcontentloaded', timeout=10000)
+                    await HumanClicker.interact_idle(page, random.uniform(1.5, 3))
+                    await HumanClicker.scroll_randomly(page)
+
+                elif action == 'scroll':
+                    await HumanClicker.scroll_randomly(page, random.randint(2, 4))
+                    await HumanClicker.simulate_mouse_movement(page)
+                    await HumanTypist.read_page(0.5, 1.5)
+
+                elif action == 'navigate':
+                    pages = ['/', '/products', '/cart', '/account']
+                    target = random.choice(pages)
+                    await page.goto(f"{FRONTEND_URL}{target}",
+                                    wait_until='domcontentloaded', timeout=10000)
+                    await HumanClicker.interact_idle(page, random.uniform(1.5, 2.5))
+
+                elif action == 'interact':
+                    # Pure interaction time — mouse moves + scrolls
+                    await HumanClicker.interact_idle(page, random.uniform(2, 4))
+
+            except Exception:
+                pass
+
             actions_done += 1
             results.append({'action': f'explore_{action}', 'success': True, 'phase': 'exploration'})
 
@@ -693,59 +763,42 @@ class TrafficGenerator:
             print(f"  [log error] event log: {e}")
     
     async def run_session(self, context: BrowserContext) -> Dict[str, Any]:
-        """Run a single browser session."""
+        """Run a single browser session with a hard timeout guard."""
         async with self.semaphore:
             self.session_count += 1
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
             user = self.select_user()
-            
+            start_time = datetime.now()
+
             print(f"[{datetime.now().isoformat()}] Session {session_id} starting: {user['email']}")
-            
+
             page = await context.new_page()
 
             # --- Stealth: mask Playwright automation signals ---
-            # LD's session replay pipeline (powered by Highlight) filters
-            # sessions from automated/bot browsers.  We override the most
-            # common detection signals so sessions look like real users.
             await page.add_init_script("""
-                // Hide navigator.webdriver flag
                 Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                    configurable: true,
+                    get: () => false, configurable: true,
                 });
-
-                // Provide realistic navigator.platform matching user-agent
                 Object.defineProperty(navigator, 'platform', {
-                    get: () => 'MacIntel',
-                    configurable: true,
+                    get: () => 'MacIntel', configurable: true,
                 });
-
-                // Normal language list instead of POSIX locale
                 Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                    configurable: true,
+                    get: () => ['en-US', 'en'], configurable: true,
                 });
-
-                // Stub chrome.runtime so headless Chrome looks like desktop Chrome
                 if (!window.chrome) { window.chrome = {}; }
                 if (!window.chrome.runtime) {
                     window.chrome.runtime = { id: undefined };
                 }
             """)
 
-            # Inject user identity into the page so the frontend uses the
-            # same user for both LD client-side context and X-User-* headers.
-            # add_init_script runs before any page scripts on every navigation.
+            # Inject user identity
             user_json = json.dumps(user)
             await page.add_init_script(f"window.__LD_USER__ = {user_json};")
 
             # --- Monitor LD event traffic ---
-            # Intercept POSTs to events.launchdarkly.com so we can log
-            # exactly which user keys are sending flag evaluation events.
             events_seen = {"bulk": 0, "feature": 0, "summary": 0, "identify": 0, "custom": 0}
 
             async def monitor_ld_events(route):
-                """Log LD event payloads without blocking them."""
                 request = route.request
                 url = request.url
                 try:
@@ -759,74 +812,86 @@ class TrafficGenerator:
                                     payload = json.loads(gzip.decompress(raw))
                                 except Exception:
                                     payload = None
-
                             if isinstance(payload, list):
                                 events_seen["bulk"] += 1
                                 for evt in payload:
                                     kind = evt.get("kind", "unknown")
                                     events_seen[kind] = events_seen.get(kind, 0) + 1
-
-                                # Log to event log file
                                 self._log_events(user["key"], session_id, payload)
-                except Exception as e:
-                    pass  # Never break the request flow
-
+                except Exception:
+                    pass
                 await route.continue_()
 
             await page.route("**/events.launchdarkly.com/**", monitor_ld_events)
-
-            # Log user key to session log file
             self._log_session_key(user["key"], session_id)
 
-            try:
-                result = await self.scenario.execute(page, user)
-                result['session_id'] = session_id
+            # ---- Run the session with a hard timeout ----
+            result = None
+            timed_out = False
 
-                # Force SDK to flush events before closing the page
+            async def _session_body():
+                nonlocal result
+                r = await self.scenario.execute(page, user)
+                r['session_id'] = session_id
+                # Flush events before close
                 try:
                     await page.evaluate("""async () => {
-                        // Try to access the LD client and flush
-                        if (window.__ldClient) {
-                            await window.__ldClient.flush();
-                        }
-                        // Also fire pagehide to trigger sendBeacon fallback
+                        if (window.__ldClient) await window.__ldClient.flush();
                         window.dispatchEvent(new Event('pagehide'));
                     }""")
                     await asyncio.sleep(1)
                 except Exception:
                     pass
+                result = r
 
-                # Log event summary
-                if events_seen["bulk"] > 0:
-                    print(f"  [{session_id}] LD events: {events_seen}")
-
-                # Check if any actions failed
-                failed = any(not a.get('success', True) for a in result.get('actions', []))
-                if failed:
-                    self.error_count += 1
-                else:
-                    self.success_count += 1
-                
-                endpoints = result.get('endpoints_hit', [])
-                duration = result.get('session_duration_seconds', 0)
-                
-                print(f"[{datetime.now().isoformat()}] Session {session_id} completed: "
-                      f"{duration:.1f}s, {len(endpoints)} endpoints, "
-                      f"{len(result.get('actions', []))} actions")
-                
-                return result
+            try:
+                await asyncio.wait_for(_session_body(), timeout=SESSION_TIMEOUT)
+            except asyncio.TimeoutError:
+                timed_out = True
             except Exception as e:
                 self.error_count += 1
                 print(f"[{datetime.now().isoformat()}] Session {session_id} error: {e}")
-                return {
-                    'session_id': session_id,
-                    'scenario': self.scenario.name,
-                    'user': user,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                }
             finally:
-                await page.close()
+                # Always close the page — this kills any stuck Playwright ops
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+            elapsed = (datetime.now() - start_time).total_seconds()
+
+            if timed_out:
+                self.error_count += 1
+                print(f"[{datetime.now().isoformat()}] Session {session_id} TIMEOUT after {elapsed:.1f}s")
+                return {
+                    'session_id': session_id, 'scenario': 'comprehensive_session',
+                    'user': user, 'error': f'timeout ({SESSION_TIMEOUT}s)',
+                    'timestamp': datetime.now().isoformat(),
+                }
+
+            if result is None:
+                return {
+                    'session_id': session_id, 'scenario': 'comprehensive_session',
+                    'user': user, 'error': 'unknown',
+                    'timestamp': datetime.now().isoformat(),
+                }
+
+            # Log event summary
+            if events_seen["bulk"] > 0:
+                print(f"  [{session_id}] LD events: {events_seen}")
+
+            failed = any(not a.get('success', True) for a in result.get('actions', []))
+            if failed:
+                self.error_count += 1
+            else:
+                self.success_count += 1
+
+            endpoints = result.get('endpoints_hit', [])
+            duration = result.get('session_duration_seconds', 0)
+            print(f"[{datetime.now().isoformat()}] Session {session_id} completed: "
+                  f"{duration:.1f}s, {len(endpoints)} endpoints, "
+                  f"{len(result.get('actions', []))} actions")
+            return result
     
     async def run_forever(self):
         """Run traffic generation forever with overlapping sessions."""
@@ -864,12 +929,16 @@ class TrafficGenerator:
                 ],
             )
 
-            # Create a persistent context for better session handling
+            # Create a persistent context for better session handling.
+            # Set aggressive default timeouts so individual Playwright
+            # operations fail fast instead of hanging the whole session.
             context = await self.browser.new_context(
                 viewport={'width': 1280, 'height': 720},
                 user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 locale='en-US',
             )
+            context.set_default_timeout(10000)           # 10s for selectors, clicks, etc.
+            context.set_default_navigation_timeout(15000) # 15s for goto / load states
             
             # Track running session tasks
             running_tasks: set = set()
