@@ -5,14 +5,34 @@ import { CartProvider } from './context/CartContext';
 import { AuthProvider } from './context/AuthContext';
 import Router from './Router';
 
+// All flag keys in the tt-qr-demo project.
+// Explicit variation() calls generate individual "feature" events
+// (when trackEvents is enabled on the flag), which link flag evaluations
+// to sessions in the LD dashboard.
+const FLAG_KEYS = [
+  { key: 'releaseNewUI',          defaultValue: false },
+  { key: 'showChatbot',           defaultValue: false },
+  { key: 'showNewFooter',         defaultValue: false },
+  { key: 'showNewFeatures',       defaultValue: false },
+  { key: 'showNewHero',           defaultValue: false },
+  { key: 'migrate-warehouse-api', defaultValue: 'v1' },
+];
+
 function App() {
   const ldClient = useLDClient();
 
-  // Evaluate all flags early in the user flow so analytics events are
-  // sent for every flag (requires sendEventsOnlyForVariation: false).
+  // Evaluate every flag explicitly on mount so individual "feature"
+  // events are generated and flushed.  This ensures the LD dashboard
+  // can correlate flag evaluations with session replay data.
   useEffect(() => {
     if (ldClient) {
-      ldClient.allFlags();
+      FLAG_KEYS.forEach(({ key, defaultValue }) => {
+        ldClient.variation(key, defaultValue);
+      });
+
+      // Flush immediately so events aren't lost if the page navigates
+      // before the SDK's automatic flush interval fires.
+      ldClient.flush();
     }
   }, [ldClient]);
 

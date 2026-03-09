@@ -209,6 +209,8 @@ services:
       - SESSIONS_PER_MINUTE=${SESSIONS_PER_MINUTE:-2}
       - MAX_CONCURRENT_BROWSERS=${MAX_CONCURRENT_BROWSERS:-3}
       - TARGET_SESSION_DURATION=${TARGET_SESSION_DURATION:-30}
+    volumes:
+      - ./simulator/logs:/app/logs
     depends_on:
       - frontend
       - api-gateway

@@ -15,6 +15,7 @@ import random
 import asyncio
 import uuid
 import json
+import gzip
 import string
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -31,6 +32,11 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 SESSIONS_PER_MINUTE = int(os.getenv('SESSIONS_PER_MINUTE', '2'))  # Fewer sessions since they're longer
 MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
 TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '30'))  # seconds
+
+# Log file that records every user key that should have both a session
+# and flag evaluations.  Check this file to verify overlap in the LD dashboard.
+SESSION_LOG_FILE = os.getenv('SESSION_LOG_FILE', '/app/logs/session_keys.log')
+EVENT_LOG_FILE = os.getenv('EVENT_LOG_FILE', '/app/logs/ld_events.log')
 
 # Sample search queries with intentional typos for realistic typing
 SEARCH_QUERIES = [
@@ -639,10 +645,52 @@ class TrafficGenerator:
         self.browser: Optional[Browser] = None
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
         self.scenario = ComprehensiveSessionScenario(target_duration=TARGET_SESSION_DURATION)
-    
+
+        # Ensure log directory exists
+        os.makedirs(os.path.dirname(SESSION_LOG_FILE), exist_ok=True)
+        os.makedirs(os.path.dirname(EVENT_LOG_FILE), exist_ok=True)
+
     def select_user(self) -> dict:
         """Select a random user for the session."""
         return get_random_user()
+
+    def _log_session_key(self, user_key: str, session_id: str):
+        """Append user key to the session log file.
+
+        Each line: <ISO timestamp> | <session_id> | <user_key>
+        Tail this file to see which keys should have sessions + flag evals.
+        """
+        try:
+            with open(SESSION_LOG_FILE, "a") as f:
+                f.write(f"{datetime.now().isoformat()} | {session_id} | {user_key}\n")
+        except Exception as e:
+            print(f"  [log error] session log: {e}")
+
+    def _log_events(self, user_key: str, session_id: str, events: list):
+        """Log LD event payloads to the event log file.
+
+        Writes a summary of each event batch:  which kinds, which flag keys,
+        and the user key, so you can cross-reference with the session log.
+        """
+        try:
+            feature_flags = []
+            kinds = {}
+            for evt in events:
+                k = evt.get("kind", "unknown")
+                kinds[k] = kinds.get(k, 0) + 1
+                if k == "feature":
+                    feature_flags.append(evt.get("key", "?"))
+
+            with open(EVENT_LOG_FILE, "a") as f:
+                line = (
+                    f"{datetime.now().isoformat()} | {session_id} | {user_key}"
+                    f" | kinds={json.dumps(kinds)}"
+                )
+                if feature_flags:
+                    line += f" | flags={','.join(feature_flags)}"
+                f.write(line + "\n")
+        except Exception as e:
+            print(f"  [log error] event log: {e}")
     
     async def run_session(self, context: BrowserContext) -> Dict[str, Any]:
         """Run a single browser session."""
@@ -691,10 +739,67 @@ class TrafficGenerator:
             user_json = json.dumps(user)
             await page.add_init_script(f"window.__LD_USER__ = {user_json};")
 
+            # --- Monitor LD event traffic ---
+            # Intercept POSTs to events.launchdarkly.com so we can log
+            # exactly which user keys are sending flag evaluation events.
+            events_seen = {"bulk": 0, "feature": 0, "summary": 0, "identify": 0, "custom": 0}
+
+            async def monitor_ld_events(route):
+                """Log LD event payloads without blocking them."""
+                request = route.request
+                url = request.url
+                try:
+                    if request.method == "POST" and "events.launchdarkly.com/events/bulk" in url:
+                        raw = request.post_data_buffer
+                        if raw:
+                            try:
+                                payload = json.loads(raw)
+                            except Exception:
+                                try:
+                                    payload = json.loads(gzip.decompress(raw))
+                                except Exception:
+                                    payload = None
+
+                            if isinstance(payload, list):
+                                events_seen["bulk"] += 1
+                                for evt in payload:
+                                    kind = evt.get("kind", "unknown")
+                                    events_seen[kind] = events_seen.get(kind, 0) + 1
+
+                                # Log to event log file
+                                self._log_events(user["key"], session_id, payload)
+                except Exception as e:
+                    pass  # Never break the request flow
+
+                await route.continue_()
+
+            await page.route("**/events.launchdarkly.com/**", monitor_ld_events)
+
+            # Log user key to session log file
+            self._log_session_key(user["key"], session_id)
+
             try:
                 result = await self.scenario.execute(page, user)
                 result['session_id'] = session_id
-                
+
+                # Force SDK to flush events before closing the page
+                try:
+                    await page.evaluate("""async () => {
+                        // Try to access the LD client and flush
+                        if (window.__ldClient) {
+                            await window.__ldClient.flush();
+                        }
+                        // Also fire pagehide to trigger sendBeacon fallback
+                        window.dispatchEvent(new Event('pagehide'));
+                    }""")
+                    await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+                # Log event summary
+                if events_seen["bulk"] > 0:
+                    print(f"  [{session_id}] LD events: {events_seen}")
+
                 # Check if any actions failed
                 failed = any(not a.get('success', True) for a in result.get('actions', []))
                 if failed:
