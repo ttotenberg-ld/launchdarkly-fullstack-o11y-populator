@@ -10,8 +10,8 @@ Architecture note: error injection is gated behind `get_warehouse_api_version()`
 which evaluates the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
 The flag is multivariate (string) with three variations:
-  - "v1" / Stable legacy:       original warehouse API, no errors
-  - "v2" / Unstable migration:  new warehouse API v2, errors at configured rates
+  - "v1" / Stable legacy:       original warehouse API, ~1% background error rate
+  - "v2" / Unstable migration:  new warehouse API v2, errors at configured rates (~18%)
   - "v3" / Stable (iterated):   v2 after stabilization, errors resolved
 """
 
@@ -140,7 +140,7 @@ def get_warehouse_api_version() -> str:
     controlled by the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
     Returns "v1", "v2", or "v3":
-      - "v1": stable legacy path (no error injection)
+      - "v1": stable legacy path (~1% background error rate)
       - "v2": unstable migration (errors injected at configured rates)
       - "v3": stabilized v2 iteration (no error injection)
     """
@@ -182,6 +182,30 @@ def get_warehouse_api_version() -> str:
     )
 
     return flag_value
+
+
+# Error scenarios for the stable v1 legacy warehouse API.
+# These represent rare, intermittent issues typical of aging infrastructure:
+# connection pool exhaustion, occasional query timeouts, etc.
+# Combined rate is ~1% to establish a realistic baseline error rate.
+WAREHOUSE_V1_ERRORS = [
+    {
+        "rate": 0.005,
+        "endpoints": ["*"],
+        "error_type": "WarehouseLegacyConnectionPoolError",
+        "message": "Warehouse API v1: connection pool exhausted (max_connections=50, active=50)",
+        "status_code": 503,
+        "latency": (2.0, 5.0),
+    },
+    {
+        "rate": 0.005,
+        "endpoints": ["/check", "/reserve"],
+        "error_type": "WarehouseLegacyQueryTimeoutError",
+        "message": "Warehouse API v1: SQL query timed out after 30s on inventory_ledger table",
+        "status_code": 504,
+        "latency": (4.0, 8.0),
+    },
+]
 
 
 # Error scenarios for the warehouse API v2 migration.
@@ -260,10 +284,37 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
         },
     )
 
-    # Only v2 injects errors — v1 (legacy) and v3 (stabilized) are stable
-    if api_version != "v2":
+    # v3 (stabilized) is fully stable — no error injection
+    if api_version == "v3":
         return None
 
+    # v1 (legacy) has a very low background error rate (~1%)
+    if api_version == "v1":
+        for scenario in WAREHOUSE_V1_ERRORS:
+            if not _scenario_matches_endpoint(scenario, endpoint):
+                continue
+            if random.random() < scenario["rate"]:
+                latency_range = scenario.get("latency", (0.1, 0.5))
+                latency = random.uniform(*latency_range)
+                record_log(
+                    f"Warehouse API v1 legacy error pending: {scenario['error_type']} "
+                    f"(simulating {latency:.1f}s latency)",
+                    LEVELS['debug'],
+                    {
+                        **get_common_attributes(SERVICE_NAME, endpoint),
+                        'warehouse.error_type': scenario['error_type'],
+                        'warehouse.simulated_latency_s': round(latency, 2),
+                    },
+                )
+                time.sleep(latency)
+                return WarehouseAPIError(
+                    message=scenario["message"],
+                    error_type=scenario["error_type"],
+                    status_code=scenario["status_code"],
+                )
+        return None
+
+    # v2 (unstable migration) has the highest error rates
     for scenario in WAREHOUSE_V2_ERRORS:
         if not _scenario_matches_endpoint(scenario, endpoint):
             continue
