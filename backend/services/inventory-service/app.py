@@ -11,7 +11,7 @@ which evaluates the 'migrate-warehouse-api' LaunchDarkly feature flag.
 
 The flag is multivariate (string) with three variations:
   - "v1" / Stable legacy:       original warehouse API, ~1% background error rate
-  - "v2" / Unstable migration:  new warehouse API v2, errors at configured rates (~18%)
+  - "v2" / Unstable migration:  new warehouse API v2, errors at configured rates (~54%)
   - "v3" / Stable (iterated):   v2 after stabilization, errors resolved
 """
 
@@ -190,7 +190,7 @@ def get_warehouse_api_version() -> str:
 # Combined rate is ~1% to establish a realistic baseline error rate.
 WAREHOUSE_V1_ERRORS = [
     {
-        "rate": 0.005,
+        "rate": 0.01,
         "endpoints": ["*"],
         "error_type": "WarehouseLegacyConnectionPoolError",
         "message": "Warehouse API v1: connection pool exhausted (max_connections=50, active=50)",
@@ -198,7 +198,7 @@ WAREHOUSE_V1_ERRORS = [
         "latency": (2.0, 5.0),
     },
     {
-        "rate": 0.005,
+        "rate": 0.01,
         "endpoints": ["/check", "/reserve"],
         "error_type": "WarehouseLegacyQueryTimeoutError",
         "message": "Warehouse API v1: SQL query timed out after 30s on inventory_ledger table",
@@ -215,7 +215,7 @@ WAREHOUSE_V1_ERRORS = [
 # surfaces (e.g. timeouts take a long time, rate limits are fast).
 WAREHOUSE_V2_ERRORS = [
     {
-        "rate": 0.06,
+        "rate": 0.28,
         "endpoints": ["/reserve", "/check", "/products"],
         "error_type": "WarehouseAPIv2TimeoutError",
         "message": "Warehouse API v2: request timed out after 10s (endpoint: /v2/inventory/query)",
@@ -223,7 +223,7 @@ WAREHOUSE_V2_ERRORS = [
         "latency": (3.0, 8.0),
     },
     {
-        "rate": 0.04,
+        "rate": 0.24,
         "endpoints": ["/reserve", "/check", "/products"],
         "error_type": "WarehouseAPIv2ResponseParseError",
         "message": "Warehouse API v2: unexpected response format — got 'available_qty' instead of 'quantity_on_hand'",
@@ -231,7 +231,7 @@ WAREHOUSE_V2_ERRORS = [
         "latency": (0.5, 2.0),
     },
     {
-        "rate": 0.02,
+        "rate": 0.09,
         "endpoints": ["*"],
         "error_type": "WarehouseAPIv2AuthError",
         "message": "Warehouse API v2: authentication failed — API key rotation in progress",
@@ -239,7 +239,7 @@ WAREHOUSE_V2_ERRORS = [
         "latency": (1.0, 3.0),
     },
     {
-        "rate": 0.03,
+        "rate": 0.18,
         "endpoints": ["/reserve", "/check"],
         "error_type": "WarehouseAPIv2RateLimitError",
         "message": "Warehouse API v2: rate limit exceeded (100 req/min) — retry after 12s",
@@ -247,7 +247,7 @@ WAREHOUSE_V2_ERRORS = [
         "latency": (0.2, 0.8),
     },
     {
-        "rate": 0.03,
+        "rate": 0.14,
         "endpoints": ["/check", "/products"],
         "error_type": "StaleInventoryCacheError",
         "message": "Inventory cache invalidation failed — v2 cache key format mismatch",
