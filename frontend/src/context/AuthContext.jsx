@@ -30,6 +30,10 @@ export function AuthProvider({ children }) {
           key: user.key,
           name: user.name,
           email: user.email,
+          ...(user.plan && { plan: user.plan }),
+          ...(user.role && { role: user.role }),
+          ...(user.metro && { metro: user.metro }),
+          ...(user.country && { country: user.country }),
         });
       }
     } else {

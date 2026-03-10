@@ -20,6 +20,34 @@ from shared.users import get_random_user, get_user_context
 
 from shared.service_names import get_service_url
 
+
+def _user_from_headers() -> dict:
+    """
+    Reconstruct the current user from the X-User-* headers the frontend
+    sends on every request.  Falls back to get_random_user() only when
+    headers are absent (e.g. health checks or local-dev without the
+    simulator).
+    """
+    key = request.headers.get('X-User-Key')
+    if not key:
+        return get_random_user()
+
+    user = {'key': key}
+    _MAP = {
+        'X-User-Name': 'name',
+        'X-User-Email': 'email',
+        'X-User-Plan': 'plan',
+        'X-User-Role': 'role',
+        'X-User-Metro': 'metro',
+        'X-User-Country': 'country',
+    }
+    for header, attr in _MAP.items():
+        val = request.headers.get(header)
+        if val:
+            user[attr] = val
+
+    return user
+
 # Load environment variables
 load_dotenv()
 
@@ -119,8 +147,8 @@ def login():
     with start_span('gateway.auth.login') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        user = get_random_user()
+
+        user = _user_from_headers()
         data = request.get_json() or {}
         data['user'] = user
         
@@ -175,8 +203,8 @@ def checkout():
     with start_span('gateway.orders.checkout') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        user = get_random_user()
+
+        user = _user_from_headers()
         data = request.get_json() or {}
         data['user'] = user
 

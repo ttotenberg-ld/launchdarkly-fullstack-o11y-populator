@@ -40,10 +40,13 @@ CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-
 setup_flask_instrumentation(app)
 
 
+USER_HEADERS = ['X-User-Key', 'X-User-Name', 'X-User-Email', 'X-User-Plan', 'X-User-Role', 'X-User-Metro', 'X-User-Country']
+
+
 def get_trace_headers():
-    """Extract trace context headers from the incoming request."""
+    """Extract trace context and user context headers from the incoming request."""
     headers = {}
-    for key in ['traceparent', 'tracestate']:
+    for key in ['traceparent', 'tracestate'] + USER_HEADERS:
         if key in request.headers:
             headers[key] = request.headers[key]
     return headers
