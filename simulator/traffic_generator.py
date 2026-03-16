@@ -1,4 +1,4 @@
-"""
+B"""
 Traffic Generator - Generates realistic browser-based traffic for LaunchDarkly observability demo.
 Uses Playwright for headless browser automation to generate real frontend sessions.
 
@@ -49,6 +49,65 @@ SEARCH_QUERIES = [
     ('experiment', ['experiemnt', 'expirement', 'experimetn']),
     ('deployment', ['deploymnet', 'deplyoment', 'deployemnt']),
     ('configuration', ['configuraiton', 'configration', 'configuraton']),
+]
+
+
+# Flag keys the feedback widget can target
+FEEDBACK_FLAG_KEYS = [
+    'releaseNewUI',
+    'showNewHero',
+    'showNewFeatures',
+    'migrate-warehouse-api',
+]
+
+# Feedback text pools — sentiment is weighted by whether errors occurred
+FEEDBACK_POSITIVE = [
+    "Everything is running smoothly, really impressed with the speed!",
+    "Love the new UI, it feels very intuitive and fast.",
+    "Products loaded instantly, great improvement over last week.",
+    "The checkout flow was seamless, no issues at all.",
+    "Searching for products is super fast now, nice work!",
+    "Page loads are noticeably faster, the new version is solid.",
+    "Clean layout, easy to navigate. Keep it up!",
+    "No complaints — everything just works.",
+    "Really happy with the new features, makes my workflow easier.",
+    "The site feels snappy and responsive, great experience overall.",
+    "This update is a huge improvement, well done!",
+    "Feature flags seem to be working perfectly on my end.",
+    "Smooth browsing experience today, nothing broken.",
+    "The product pages look great and load quickly.",
+    "Best experience I've had on this site in a while.",
+]
+
+FEEDBACK_NEUTRAL = [
+    "It's okay, nothing special. Works as expected.",
+    "Some pages load a bit slow but nothing terrible.",
+    "The layout is fine, could use some polish though.",
+    "Didn't notice much difference from before.",
+    "Average experience, gets the job done.",
+    "A few minor hiccups but overall functional.",
+    "The new features are alright, still getting used to them.",
+    "Not bad, not great. Just okay.",
+    "Some things improved, others feel the same.",
+    "Works fine for what I need, no strong opinions.",
+]
+
+FEEDBACK_NEGATIVE = [
+    "Getting constant errors when trying to view products. Very frustrating.",
+    "The site keeps timing out, I can't complete my checkout!",
+    "Something is broken — I keep seeing 500 errors on every page.",
+    "Product pages fail to load half the time, this is unusable.",
+    "Checkout failed with a server error. Lost my entire cart.",
+    "The new version is extremely unreliable, please fix this.",
+    "Pages are crashing left and right, worst experience ever.",
+    "I keep getting gateway timeout errors, can't browse anything.",
+    "Seriously broken — error after error. Rolling back would be better.",
+    "The warehouse API errors are killing my experience. Nothing works.",
+    "Can't even add items to cart without hitting an error.",
+    "Every other page load fails. This is not production-ready.",
+    "Rate limit errors everywhere, the site is barely functional.",
+    "Authentication keeps failing randomly, very unreliable.",
+    "I've encountered more errors today than in the past month combined.",
 ]
 
 
@@ -239,12 +298,22 @@ class ComprehensiveSessionScenario:
         self.name = "comprehensive_session"
         self.target_duration = target_duration
         self.endpoints_hit = set()
-    
+        self.api_errors = 0  # HTTP errors seen during this session
+
     async def execute(self, page: Page, user: dict) -> Dict[str, Any]:
         """Execute a comprehensive user session with a hard timeout."""
         results = []
         start_time = datetime.now()
         self.endpoints_hit = set()
+        self.api_errors = 0
+
+        # Track HTTP error responses from the backend so feedback
+        # sentiment can be weighted by the user's actual experience.
+        def _on_response(response):
+            if '/api/' in response.url and response.status >= 500:
+                self.api_errors += 1
+
+        page.on('response', _on_response)
 
         async def _run_phases():
             # Phase 1: Initial landing and exploration
@@ -265,7 +334,10 @@ class ComprehensiveSessionScenario:
             # Phase 6: Add to cart and checkout
             await self._phase_checkout(page, user, results)
 
-            # Phase 7: Final browsing/exploration — fill up to target duration
+            # Phase 7: Submit qualitative feedback (sentiment based on errors)
+            await self._phase_feedback(page, results)
+
+            # Phase 8: Final browsing/exploration — fill up to target duration
             elapsed = (datetime.now() - start_time).total_seconds()
             remaining = max(0, self.target_duration - elapsed)
             if remaining > 3:
@@ -665,6 +737,82 @@ class ComprehensiveSessionScenario:
         
         results.append({'action': 'fill_payment', 'success': True, 'phase': 'checkout'})
     
+    async def _phase_feedback(self, page: Page, results: List[Dict]):
+        """Submit qualitative feedback via the LD SDK.
+
+        Sentiment is weighted by how many HTTP 5xx errors the user saw
+        during this session:
+          - 0 errors:  60% positive, 30% neutral, 10% negative
+          - 1-2 errors: 20% positive, 30% neutral, 50% negative
+          - 3+ errors: 5% positive, 10% neutral, 85% negative
+
+        ~80% of sessions leave feedback to generate a healthy volume.
+        """
+        if random.random() > 0.80:
+            # 20% of sessions skip feedback entirely
+            return
+
+        # Choose sentiment based on errors observed
+        if self.api_errors == 0:
+            sentiment = random.choices(
+                ['positive', 'neutral', 'negative'],
+                weights=[0.60, 0.30, 0.10],
+            )[0]
+        elif self.api_errors <= 2:
+            sentiment = random.choices(
+                ['positive', 'neutral', 'negative'],
+                weights=[0.20, 0.30, 0.50],
+            )[0]
+        else:
+            sentiment = random.choices(
+                ['positive', 'neutral', 'negative'],
+                weights=[0.05, 0.10, 0.85],
+            )[0]
+
+        # Pick feedback text matching sentiment
+        if sentiment == 'positive':
+            text = random.choice(FEEDBACK_POSITIVE)
+        elif sentiment == 'neutral':
+            text = random.choice(FEEDBACK_NEUTRAL)
+        else:
+            text = random.choice(FEEDBACK_NEGATIVE)
+
+        # Pick a flag to associate. Bias toward migrate-warehouse-api
+        # when errors were observed since it's the error source.
+        if self.api_errors > 0 and random.random() < 0.70:
+            flag_key = 'migrate-warehouse-api'
+        else:
+            flag_key = random.choice(FEEDBACK_FLAG_KEYS)
+
+        try:
+            success = await page.evaluate(
+                """([flagKey, sentiment, text]) => {
+                    if (typeof window.__submitFeedback === 'function') {
+                        return window.__submitFeedback(flagKey, sentiment, text);
+                    }
+                    return false;
+                }""",
+                [flag_key, sentiment, text],
+            )
+            results.append({
+                'action': 'submit_feedback',
+                'success': bool(success),
+                'phase': 'feedback',
+                'sentiment': sentiment,
+                'flag_key': flag_key,
+                'api_errors_seen': self.api_errors,
+            })
+        except Exception as e:
+            results.append({
+                'action': 'submit_feedback',
+                'success': False,
+                'error': str(e),
+                'phase': 'feedback',
+            })
+
+        # Brief pause after submitting
+        await HumanTypist.hesitate(0.5, 1.0)
+
     async def _phase_final_exploration(self, page: Page, results: List[Dict], time_remaining: float):
         """Use remaining time to explore more of the site with rich
         mouse/scroll interactions that rrweb records as timeline events."""
