@@ -190,7 +190,7 @@ def get_warehouse_api_version() -> str:
 # Combined rate is ~1% to establish a realistic baseline error rate.
 WAREHOUSE_V1_ERRORS = [
     {
-        "rate": 0.01,
+        "rate": 0.02,
         "endpoints": ["*"],
         "error_type": "WarehouseLegacyConnectionPoolError",
         "message": "Warehouse API v1: connection pool exhausted (max_connections=50, active=50)",
@@ -198,7 +198,7 @@ WAREHOUSE_V1_ERRORS = [
         "latency": (2.0, 5.0),
     },
     {
-        "rate": 0.01,
+        "rate": 0.02,
         "endpoints": ["/check", "/reserve"],
         "error_type": "WarehouseLegacyQueryTimeoutError",
         "message": "Warehouse API v1: SQL query timed out after 30s on inventory_ledger table",
