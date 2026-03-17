@@ -179,6 +179,18 @@ export const api = {
   
   // Orders
   listOrders: () => request('/api/orders'),
+
+  // Chat (AI support chatbot)
+  chat: (message) => request('/api/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  }),
+
+  // Chat feedback (thumbs up/down on AI response)
+  chatFeedback: (generationId, sentiment) => request('/api/chat/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ generation_id: generationId, sentiment }),
+  }),
 };
 
 export default api;

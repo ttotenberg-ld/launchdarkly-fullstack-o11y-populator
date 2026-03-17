@@ -31,11 +31,14 @@ flowchart TB
             Cart[Cart Page]
             Checkout[Checkout Page]
         end
+        subgraph Widgets["Interactive Widgets"]
+            FeedbackWidget["FeedbackWidget<br/>(window.__submitFeedback)"]
+            ChatWidget["ChatWidget<br/>(window.__sendChatMessage)"]
+        end
         subgraph LDSDK["LaunchDarkly SDK"]
             LDClient[LD Client]
             SessionReplay["Session Replay<br/>(@launchdarkly/session-replay)"]
             Observability["Observability<br/>(@launchdarkly/observability)"]
-            FeedbackWidget["FeedbackWidget<br/>(window.__submitFeedback)"]
         end
     end
 
@@ -49,11 +52,18 @@ flowchart TB
         Pay[Payment Service]
         SearchSvc[Search Service]
         Notif[Notification Service]
+        ChatSvc["Chat Service<br/>(LD AI Config + OpenLLMetry)"]
+    end
+
+    subgraph LLM["Ollama (LLM Server)"]
+        Gemma["gemma3:1b"]
+        DeepSeek["deepseek-r1:1.5b"]
     end
 
     subgraph LD["LaunchDarkly Platform"]
         LDEvents[events.launchdarkly.com]
         LDStream[clientstream.launchdarkly.com]
+        LDAIConfig["AI Config: support-chatbot<br/>(model + prompt per variation)"]
     end
 
     TG --> BC
@@ -69,6 +79,9 @@ flowchart TB
     API --> Pay
     API --> SearchSvc
     API --> Notif
+    API --> ChatSvc
+    ChatSvc --> LLM
+    ChatSvc --> LDAIConfig
     LDClient --> LDEvents
     LDClient --> LDStream
     SessionReplay --> LDEvents
@@ -166,12 +179,25 @@ flowchart TD
 
     Phase7 --> Phase8
 
-    subgraph Phase8["Phase 8: Final Exploration"]
-        P8A{Time Remaining?}
-        P8A -->|Yes| P8B[Random Action]
-        P8B --> P8C["Browse / Scroll / Navigate / Interact<br/>(with mouse + idle interactions)"]
-        P8C --> P8A
-        P8A -->|No| Flush
+    subgraph Phase8["Phase 8: Chat (50% of sessions)"]
+        P8A{Open chatbot?<br/>50% chance} -->|No| Phase9
+        P8A -->|Yes| P8B["Pick 1-3 questions<br/>from CHAT_QUESTIONS"]
+        P8B --> P8C["window.__sendChatMessage(text)<br/>→ POST /api/chat → chat-service → Ollama"]
+        P8C --> P8D["Wait for LLM response<br/>(up to 30s timeout)"]
+        P8D --> P8E["Read response 1.5-3s"]
+        P8E --> P8F{More questions?}
+        P8F -->|Yes| P8C
+        P8F -->|No| Phase9
+    end
+
+    Phase8 --> Phase9
+
+    subgraph Phase9["Phase 9: Final Exploration"]
+        P9A{Time Remaining?}
+        P9A -->|Yes| P9B[Random Action]
+        P9B --> P9C["Browse / Scroll / Navigate / Interact<br/>(with mouse + idle interactions)"]
+        P9C --> P9A
+        P9A -->|No| Flush
     end
 
     Flush["Flush LD events<br/>(ldClient.flush + pagehide)"] --> End([Session End])
@@ -230,6 +256,7 @@ flowchart TB
         E7["/api/search"]
         E8["/api/checkout"]
         E9["/api/orders"]
+        E10["/api/chat (50% of sessions)"]
     end
 
     subgraph Phases["Session Phases"]
@@ -242,6 +269,7 @@ flowchart TB
         Account --> E2
         Checkout --> E8
         Checkout --> E9
+        Chat --> E10
     end
 ```
 
@@ -289,6 +317,7 @@ flowchart LR
         C3["MAX_CONCURRENT_BROWSERS<br/>default: 3"]
         C4["TARGET_SESSION_DURATION<br/>default: 60s"]
         C5["SESSION_TIMEOUT<br/>default: 90s (hard cap)"]
+        C6["OLLAMA_URL<br/>default: http://ollama:11434<br/>(overridable for central server)"]
     end
 
     subgraph Logs["Log Files"]
@@ -343,6 +372,7 @@ classDiagram
         -_fill_shipping_form(page, user, results)
         -_fill_payment_form(page, user, results)
         -_phase_feedback(page, results)
+        -_phase_chat(page, results)
         -_phase_final_exploration(page, results, time)
     }
 
@@ -441,7 +471,16 @@ sequenceDiagram
     FE->>FE: ldClient.track('$ld:feedback', data + o11y_session_id)
     FE->>LD: flush() feedback event
 
-    Note over CSS: Phase 8: Final Exploration
+    Note over CSS: Phase 8: Chat (50% of sessions)
+    CSS->>Page: evaluate(window.__sendChatMessage(question))
+    Page->>FE: __sendChatMessage(text)
+    FE->>BE: POST /api/chat (X-User-* headers)
+    BE->>BE: chat-service: ai_client.config('support-chatbot')
+    BE->>BE: chat-service: ollama.chat(model, messages)
+    BE-->>FE: LLM response
+    FE-->>Page: response text
+
+    Note over CSS: Phase 9: Final Exploration
     loop Until target duration reached
         CSS->>HC: interact_idle() / scroll / navigate
     end
@@ -449,6 +488,70 @@ sequenceDiagram
     CSS-->>TG: return results
     TG->>Page: evaluate(ldClient.flush + pagehide)
     TG->>Page: close()
+```
+
+## AI Support Chatbot (LLM via Ollama + LD AI Configs)
+
+The chat-service uses **two layers of observability**:
+
+1. **LD AI SDK tracker** — records per-request metrics (token usage, latency, success/error) tied to the AI Config variation → visible in **AI Configs → Monitoring**
+2. **OpenLLMetry auto-instrumentation** — captures LLM spans (model, prompts, responses, tokens, duration) as OpenTelemetry traces → visible in **Observability → Traces** with the green LLM badge
+
+```mermaid
+flowchart LR
+    subgraph Simulator
+        Question["CHAT_QUESTIONS<br/>(15 realistic support questions)"]
+    end
+
+    subgraph Frontend
+        CW["ChatWidget<br/>window.__sendChatMessage()"]
+    end
+
+    subgraph APIGateway
+        ChatRoute["POST /api/chat"]
+    end
+
+    subgraph ChatService["chat-service (port 5009)"]
+        AIConfig["LDAIClient.config()<br/>AI Config: support-chatbot"]
+        OllamaCall["ollama.chat()<br/>(auto-instrumented by OpenLLMetry)"]
+        Tracker["tracker.track_success()<br/>tracker.track_tokens()<br/>tracker.track_duration()"]
+        StripThink["Strip &lt;think&gt; tags<br/>(DeepSeek R1)"]
+    end
+
+    subgraph Ollama["Ollama Server"]
+        Gemma["gemma3:1b"]
+        DeepSeek["deepseek-r1:1.5b"]
+    end
+
+    subgraph LDPlatform["LaunchDarkly"]
+        AIConfigDash["AI Configs → Monitoring<br/>(generations, latency, tokens per variation)"]
+        Traces["Observability → Traces<br/>(LLM spans with green badge)"]
+    end
+
+    Question --> CW
+    CW --> ChatRoute
+    ChatRoute --> AIConfig
+    AIConfig -->|"model + prompt<br/>from variation"| OllamaCall
+    OllamaCall --> Ollama
+    OllamaCall --> StripThink
+    Tracker --> AIConfigDash
+    OllamaCall -->|"OpenLLMetry spans"| Traces
+```
+
+### Deployment Modes
+
+```mermaid
+flowchart TB
+    subgraph Local["Local Dev (--profile local-models)"]
+        CS1["chat-service"] --> OL1["Ollama container<br/>(ollama_data volume)"]
+        Init["ollama-pull init<br/>(pulls gemma3:1b + deepseek-r1:1.5b)"] --> OL1
+    end
+
+    subgraph Team["Team Deployment (no profile)"]
+        CS2["Instance 1 chat-service"] --> Central["Central Ollama Server<br/>(OLLAMA_URL env var)"]
+        CS3["Instance 2 chat-service"] --> Central
+        CS4["Instance N chat-service"] --> Central
+    end
 ```
 
 ## Error Injection

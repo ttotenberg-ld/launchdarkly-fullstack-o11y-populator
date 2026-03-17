@@ -110,6 +110,25 @@ FEEDBACK_NEGATIVE = [
     "I've encountered more errors today than in the past month combined.",
 ]
 
+# Realistic support chat questions for the AI chatbot
+CHAT_QUESTIONS = [
+    "What's your return policy?",
+    "How long does shipping usually take?",
+    "Can I cancel my order?",
+    "Do you ship internationally?",
+    "What payment methods do you accept?",
+    "How do I track my order?",
+    "Is this item in stock?",
+    "Can I change my shipping address after placing an order?",
+    "Do you offer any discounts for bulk purchases?",
+    "How do I reset my password?",
+    "What's the difference between the free and premium plans?",
+    "I'm having trouble checking out, can you help?",
+    "Are there any current promotions or sales?",
+    "How do I contact customer support by phone?",
+    "Can I get a refund if I'm not satisfied?",
+]
+
 
 class HumanTypist:
     """Simulates human-like typing behavior with mistakes and corrections."""
@@ -337,7 +356,10 @@ class ComprehensiveSessionScenario:
             # Phase 7: Submit qualitative feedback (sentiment based on errors)
             await self._phase_feedback(page, results)
 
-            # Phase 8: Final browsing/exploration — fill up to target duration
+            # Phase 8: AI support chat (~50% of sessions)
+            await self._phase_chat(page, results)
+
+            # Phase 9: Final browsing/exploration — fill up to target duration
             elapsed = (datetime.now() - start_time).total_seconds()
             remaining = max(0, self.target_duration - elapsed)
             if remaining > 3:
@@ -811,6 +833,116 @@ class ComprehensiveSessionScenario:
             })
 
         # Brief pause after submitting
+        await HumanTypist.hesitate(0.5, 1.0)
+
+    async def _phase_chat(self, page: Page, results: List[Dict]):
+        """Open the AI support chatbot and ask 1-3 questions.
+
+        ~50% of sessions interact with the chatbot. Messages are sent via
+        the programmatic window.__sendChatMessage(text) API exposed by
+        ChatWidget, which calls POST /api/chat → chat-service → Ollama.
+
+        LLM inference can take several seconds, so we wait generously for
+        each response before sending the next question.
+        """
+        if random.random() > 0.50:
+            # Half of sessions skip the chatbot
+            return
+
+        questions = random.sample(CHAT_QUESTIONS, k=random.randint(1, 3))
+
+        for i, question in enumerate(questions):
+            try:
+                # LLM inference may be slow on CPU-only Ollama — allow
+                # up to 30s for the round-trip (default 10s is too tight).
+                response = await asyncio.wait_for(
+                    page.evaluate(
+                        """async (text) => {
+                            if (typeof window.__sendChatMessage === 'function') {
+                                return await window.__sendChatMessage(text);
+                            }
+                            return null;
+                        }""",
+                        question,
+                    ),
+                    timeout=30,
+                )
+
+                success = response is not None
+                results.append({
+                    'action': 'chat_message',
+                    'success': success,
+                    'phase': 'chat',
+                    'question': question,
+                    'response_length': len(response) if response else 0,
+                    'message_index': i + 1,
+                })
+
+                if success:
+                    self.endpoints_hit.add('/api/chat')
+
+                # Brief pause between messages — like reading the response
+                await HumanTypist.read_page(1.5, 3.0)
+
+            except Exception as e:
+                results.append({
+                    'action': 'chat_message',
+                    'success': False,
+                    'error': str(e),
+                    'phase': 'chat',
+                    'question': question,
+                    'message_index': i + 1,
+                })
+                # Don't bail on error — try next question
+                await HumanTypist.hesitate(0.5, 1.0)
+
+        # Submit thumbs up/down feedback on the last bot response (~70% of
+        # chatbot users give feedback).  Sentiment is weighted by how many
+        # API errors were seen during the session, similar to _phase_feedback.
+        if random.random() < 0.70:
+            # Decide sentiment based on error count
+            if self.api_errors == 0:
+                sentiment = random.choices(
+                    ['positive', 'negative'],
+                    weights=[0.75, 0.25],
+                )[0]
+            elif self.api_errors <= 2:
+                sentiment = random.choices(
+                    ['positive', 'negative'],
+                    weights=[0.40, 0.60],
+                )[0]
+            else:
+                sentiment = random.choices(
+                    ['positive', 'negative'],
+                    weights=[0.15, 0.85],
+                )[0]
+
+            try:
+                feedback_sent = await page.evaluate(
+                    """async (sentiment) => {
+                        if (typeof window.__sendChatFeedback === 'function') {
+                            return await window.__sendChatFeedback(sentiment);
+                        }
+                        return false;
+                    }""",
+                    sentiment,
+                )
+                results.append({
+                    'action': 'chat_feedback',
+                    'success': bool(feedback_sent),
+                    'phase': 'chat',
+                    'sentiment': sentiment,
+                    'api_errors_seen': self.api_errors,
+                })
+            except Exception as e:
+                results.append({
+                    'action': 'chat_feedback',
+                    'success': False,
+                    'error': str(e),
+                    'phase': 'chat',
+                })
+
+        # Brief pause after finishing chat
         await HumanTypist.hesitate(0.5, 1.0)
 
     async def _phase_final_exploration(self, page: Page, results: List[Dict], time_remaining: float):

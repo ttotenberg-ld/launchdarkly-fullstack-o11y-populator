@@ -52,6 +52,11 @@ SERVICE_REGISTRY: Dict[str, dict] = {
         "description": "Search Service - Product and user search",
         "downstream": ["inventory-service"],
     },
+    "chat-service": {
+        "port": 5009,
+        "description": "Chat Service - AI support chatbot via Ollama (LD AI Configs)",
+        "downstream": [],
+    },
 }
 
 # Virtual service names for display/simulation purposes

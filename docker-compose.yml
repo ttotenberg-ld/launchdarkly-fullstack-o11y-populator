@@ -19,6 +19,7 @@ services:
       - order-service
       - search-service
       - inventory-service
+      - chat-service
     networks:
       - ld-observability
     restart: unless-stopped
@@ -182,6 +183,64 @@ services:
       - ld-observability
     restart: unless-stopped
 
+  # Chat Service (AI support chatbot via Ollama + LD AI Configs)
+  chat-service:
+    build:
+      context: ./backend
+      dockerfile: services/chat-service/Dockerfile
+    ports:
+      - "5009:5009"
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=chat-service
+      - SERVICE_VERSION=1.0.0
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - FLASK_PORT=5009
+      - USE_DOCKER=true
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+    networks:
+      - ld-observability
+    restart: unless-stopped
+
+  # Ollama - Local LLM server (only with --profile local-models)
+  # For team deployments, set OLLAMA_URL in .env to point at a shared central server instead
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ld-observability
+    restart: unless-stopped
+    profiles:
+      - local-models
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # One-shot init container to pull models into Ollama (only with --profile local-models)
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling gemma3:1b..."
+        OLLAMA_HOST=http://ollama:11434 ollama pull gemma3:1b
+        echo "Pulling deepseek-r1:1.5b..."
+        OLLAMA_HOST=http://ollama:11434 ollama pull deepseek-r1:1.5b
+        echo "All models pulled successfully."
+    networks:
+      - ld-observability
+    profiles:
+      - local-models
+
   # Frontend
   frontend:
     build:
@@ -223,6 +282,9 @@ services:
       resources:
         limits:
           memory: 2G
+
+volumes:
+  ollama_data:
 
 networks:
   ld-observability:

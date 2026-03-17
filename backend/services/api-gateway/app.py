@@ -271,6 +271,42 @@ def get_product(product_id):
         return jsonify(result)
 
 
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """Chat endpoint - forwards to chat-service (AI support chatbot)."""
+    with start_span('gateway.chat.message') as span:
+        span.set_attribute('source', 'backend')
+        span.set_attribute('service', SERVICE_NAME)
+
+        data = request.get_json() or {}
+
+        record_log("Chat message received", LEVELS['info'], {
+            **get_common_attributes(SERVICE_NAME, '/api/chat'),
+            'message_length': len(data.get('message', '')),
+        })
+
+        result = call_service('chat-service', '/chat', 'POST', data)
+        return jsonify(result)
+
+
+@app.route('/api/chat/feedback', methods=['POST'])
+def chat_feedback():
+    """Chat feedback endpoint - forwards to chat-service (AI thumbs up/down)."""
+    with start_span('gateway.chat.feedback') as span:
+        span.set_attribute('source', 'backend')
+        span.set_attribute('service', SERVICE_NAME)
+
+        data = request.get_json() or {}
+
+        record_log("Chat feedback received", LEVELS['info'], {
+            **get_common_attributes(SERVICE_NAME, '/api/chat/feedback'),
+            'sentiment': data.get('sentiment', ''),
+        })
+
+        result = call_service('chat-service', '/chat/feedback', 'POST', data)
+        return jsonify(result)
+
+
 @app.route('/api/dashboard', methods=['GET'])
 def dashboard():
     """Dashboard data - aggregates from multiple services."""
@@ -313,6 +349,8 @@ def root():
             '/api/search',
             '/api/products',
             '/api/dashboard',
+            '/api/chat',
+            '/api/chat/feedback',
         ]
     })
 
