@@ -215,8 +215,7 @@ def chat():
         context = get_user_context(user)
 
         # Retrieve AI Config — determines which model + system prompt to use
-        # In SDK v0.16+, config() returns a single AICompletionConfig with .tracker
-        config_value = ai_client.config(
+        config_value = ai_client.completion_config(
             'support-chatbot',
             context,
             DEFAULT_AI_CONFIG,
@@ -366,7 +365,7 @@ def chat_feedback():
             return jsonify({'success': True, 'attributed': False})
 
         kind = FeedbackKind.Positive if sentiment == 'positive' else FeedbackKind.Negative
-        tracker.track_feedback(kind)
+        tracker.track_feedback({"kind": kind})
 
         record_log(
             f"Chat feedback: sentiment={sentiment}, gen_id={generation_id}",

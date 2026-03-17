@@ -210,6 +210,8 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
     networks:
       - ld-observability
     restart: unless-stopped
@@ -222,7 +224,7 @@ services:
       retries: 5
       start_period: 15s
 
-  # One-shot init container to pull models into Ollama (only with --profile local-models)
+  # One-shot init container: pull models + warm them up so first requests are fast
   ollama-pull:
     image: ollama/ollama:latest
     depends_on:
@@ -235,7 +237,12 @@ services:
         OLLAMA_HOST=http://ollama:11434 ollama pull gemma3:1b
         echo "Pulling deepseek-r1:1.5b..."
         OLLAMA_HOST=http://ollama:11434 ollama pull deepseek-r1:1.5b
-        echo "All models pulled successfully."
+        echo "All models pulled. Warming up..."
+        OLLAMA_HOST=http://ollama:11434 ollama run gemma3:1b "hi" --nowordwrap
+        echo "gemma3:1b warm."
+        OLLAMA_HOST=http://ollama:11434 ollama run deepseek-r1:1.5b "hi" --nowordwrap
+        echo "deepseek-r1:1.5b warm."
+        echo "All models ready."
     networks:
       - ld-observability
     profiles:

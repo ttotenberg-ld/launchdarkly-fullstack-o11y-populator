@@ -78,23 +78,23 @@ def get_trace_headers():
     return headers
 
 
-def call_service(service_name: str, path: str, method: str = 'GET', data: dict = None) -> dict:
+def call_service(service_name: str, path: str, method: str = 'GET', data: dict = None, timeout: int = 30) -> dict:
     """Call a downstream service with trace context propagation."""
     url = get_service_url(service_name, USE_DOCKER) + path
     headers = get_trace_headers()
     headers['Content-Type'] = 'application/json'
-    
+
     try:
         if method == 'GET':
-            resp = requests.get(url, headers=headers, timeout=30)
+            resp = requests.get(url, headers=headers, timeout=timeout)
         elif method == 'POST':
-            resp = requests.post(url, json=data, headers=headers, timeout=30)
+            resp = requests.post(url, json=data, headers=headers, timeout=timeout)
         elif method == 'PUT':
-            resp = requests.put(url, json=data, headers=headers, timeout=30)
+            resp = requests.put(url, json=data, headers=headers, timeout=timeout)
         elif method == 'DELETE':
-            resp = requests.delete(url, headers=headers, timeout=30)
+            resp = requests.delete(url, headers=headers, timeout=timeout)
         else:
-            resp = requests.request(method, url, json=data, headers=headers, timeout=30)
+            resp = requests.request(method, url, json=data, headers=headers, timeout=timeout)
         
         return resp.json()
     except requests.exceptions.RequestException as e:
@@ -285,7 +285,7 @@ def chat():
             'message_length': len(data.get('message', '')),
         })
 
-        result = call_service('chat-service', '/chat', 'POST', data)
+        result = call_service('chat-service', '/chat', 'POST', data, timeout=120)
         return jsonify(result)
 
 
