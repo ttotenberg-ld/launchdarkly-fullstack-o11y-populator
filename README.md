@@ -1,53 +1,48 @@
 # LaunchDarkly Observability Demo
 
-A full-stack microservices demo that generates realistic observability data (traces, logs, errors, sessions) for LaunchDarkly's observability platform.
+A full-stack microservices demo that generates realistic observability data (traces, logs, errors, sessions) for LaunchDarkly's observability platform. Includes an AI support chatbot powered by local LLMs via Ollama, controlled by LaunchDarkly AI Configs.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Frontend (React)                                │
+│                              Frontend (React)                               │
 │                         http://localhost:3000                                │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │   Dashboard     │  │  Auto-Play      │  │   Manual Demo   │              │
-│  │   Metrics       │  │  Simulation     │  │   Controls      │              │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐      │
+│  │  Dashboard   │  │  Products   │  │   Checkout   │  │ Chat Widget  │      │
+│  │  Metrics     │  │  & Search   │  │   Flow       │  │ (AI Support) │      │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └──────────────┘      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        API Gateway (:5000)                                   │
+│                        API Gateway (:5050)                                   │
 │                    Routes requests to services                               │
 └─────────────────────────────────────────────────────────────────────────────┘
-           │              │              │              │
-           ▼              ▼              ▼              ▼
-    ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-    │  Auth    │   │  User    │   │  Order   │   │  Search  │
-    │ :5001    │   │ :5002    │   │ :5003    │   │ :5008    │
-    └──────────┘   └──────────┘   └──────────┘   └──────────┘
-           │              │         │    │              │
-           ▼              ▼         │    ▼              ▼
-    ┌──────────┐   ┌──────────┐    │  ┌──────────┐   ┌──────────┐
-    │Analytics │   │Notific.  │    │  │ Payment  │   │Inventory │
-    │ :5007    │   │ :5006    │    │  │ :5004    │   │ :5005    │
-    └──────────┘   └──────────┘    │  └──────────┘   └──────────┘
-                                   │       │              │
-                                   └───────┴──────────────┘
-                                           ▼
-                                    ┌──────────┐
-                                    │Notific.  │
-                                    │ :5006    │
-                                    └──────────┘
+        │          │          │          │          │
+        ▼          ▼          ▼          ▼          ▼
+  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+  │  Auth  │ │  User  │ │ Order  │ │ Search │ │  Chat  │
+  │ :5001  │ │ :5002  │ │ :5003  │ │ :5008  │ │ :5009  │
+  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
+       │          │       │    │        │          │
+       ▼          ▼       │    ▼        ▼          ▼
+ ┌──────────┐ ┌────────┐ │ ┌────────┐ ┌────────┐ ┌────────┐
+ │Analytics │ │Notific.│ │ │Payment │ │Invent. │ │ Ollama │
+ │  :5007   │ │ :5006  │ │ │ :5004  │ │ :5005  │ │:11434  │
+ └──────────┘ └────────┘ │ └────────┘ └────────┘ └────────┘
+                          └──────┘
 ```
 
 ## Features
 
-- **9 Flask Microservices**: Realistic service mesh with inter-service communication
+- **10 Flask Microservices**: Realistic service mesh with inter-service communication
+- **AI Support Chatbot**: LLM-powered chat using Ollama (Gemma 3 1B / DeepSeek R1 1.5B), controlled by LaunchDarkly AI Configs
 - **Distributed Tracing**: End-to-end traces spanning frontend through multiple backend services
 - **Error Injection**: Configurable error rates that inject errors deep in trace chains
-- **Traffic Simulator**: Headless Python script generating continuous realistic traffic
-- **Auto-Play Frontend**: Browser-based simulation with real-time activity feed
+- **Traffic Simulator**: Playwright-driven browser sessions with human-like behavior (~60s each)
 - **LaunchDarkly Observability**: Full integration with traces, logs, errors, and session replay
+- **AI Metrics**: Token usage, latency, success/error rates, and user feedback (thumbs up/down) tracked via LD AI SDK
 
 ## Quick Start
 
@@ -61,7 +56,6 @@ A full-stack microservices demo that generates realistic observability data (tra
 1. **Clone and configure:**
 
 ```bash
-cd sor
 cp .env.example .env
 ```
 
@@ -75,19 +69,74 @@ VITE_LD_CLIENT_SIDE_ID=xxxxx  # Client-side ID
 3. **Start all services:**
 
 ```bash
-docker-compose up --build
+# Without AI chat (lightest, recommended for getting started)
+docker compose up -d --build
+
+# With local LLM (Docker-based Ollama, CPU-only on Mac)
+docker compose --profile local-models up -d --build
+
+# With native Ollama (GPU-accelerated, fastest on Mac)
+# Set OLLAMA_URL=http://host.docker.internal:11434 in .env first
+docker compose up -d --build
 ```
 
 4. **Access the demo:**
 
 - Frontend: http://localhost:3000
-- API Gateway: http://localhost:5000
+- API Gateway: http://localhost:5050
+
+## AI Chat Modes
+
+The AI support chatbot has three deployment modes, controlled by `.env`:
+
+| Mode | `CHAT_ENABLED` | `OLLAMA_URL` | Command | Notes |
+|------|----------------|--------------|---------|-------|
+| **No LLM** | `false` | (any) | `docker compose up -d --build` | Chat returns "down for maintenance". Lightest on resources. |
+| **Local LLM** | `true` | `http://ollama:11434` | `docker compose --profile local-models up -d --build` | Ollama runs in Docker. CPU-only on Mac (slow, ~30s/response). |
+| **Native/Remote LLM** | `true` | `http://host.docker.internal:11434` | `docker compose up -d --build` | Points at native Ollama or remote server. GPU-accelerated on Mac (~1-3s). |
+
+### Native Ollama Setup (recommended for Mac)
+
+```bash
+brew install ollama
+ollama serve &
+ollama pull gemma3:1b
+ollama pull deepseek-r1:1.5b
+```
+
+Then set in `.env`:
+```bash
+CHAT_ENABLED=true
+OLLAMA_URL=http://host.docker.internal:11434
+```
+
+### LaunchDarkly AI Config Setup
+
+Create an AI Config named `support-chatbot` with two variations:
+
+**Variation 1 — Gemma 3 1B:**
+```json
+{
+  "model": { "name": "gemma3:1b" },
+  "messages": [{ "role": "system", "content": "You are a helpful customer support agent..." }],
+  "parameters": { "temperature": 0.7, "max_tokens": 256, "top_p": 0.9 }
+}
+```
+
+**Variation 2 — DeepSeek R1 1.5B:**
+```json
+{
+  "model": { "name": "deepseek-r1:1.5b" },
+  "messages": [{ "role": "system", "content": "You are a helpful customer support agent..." }],
+  "parameters": { "temperature": 0.6, "max_tokens": 512, "top_p": 0.95, "top_k": 40 }
+}
+```
 
 ## Services
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `api-gateway` | 5000 | Routes requests, auth validation |
+| `api-gateway` | 5050 | Routes requests, auth validation |
 | `auth-service` | 5001 | Login, token validation, sessions |
 | `user-service` | 5002 | User profiles, preferences |
 | `order-service` | 5003 | Order processing, checkout flow |
@@ -96,46 +145,24 @@ docker-compose up --build
 | `notification-service` | 5006 | Email/push notifications |
 | `analytics-service` | 5007 | Event tracking |
 | `search-service` | 5008 | Product search |
+| `chat-service` | 5009 | AI support chatbot (Ollama + LD AI Configs) |
 
-## Generating Traffic
+## Traffic Simulator
 
-### Option 1: Frontend Auto-Play
-
-1. Open http://localhost:3000
-2. Click the "Auto-play" toggle in the header
-3. Adjust the rate slider to control requests per minute
-
-### Option 2: Headless Simulator
-
-The simulator container runs automatically with Docker Compose:
+The simulator runs Playwright browser sessions that behave like real users — browsing products, searching, checking out, interacting with the AI chatbot, and submitting feedback. Each session lasts ~60 seconds.
 
 ```bash
 # View simulator logs
-docker-compose logs -f simulator
-
-# Adjust rate via environment variable
-REQUESTS_PER_MINUTE=60 docker-compose up simulator
+docker compose logs -f simulator
 ```
 
-### Option 3: Manual Testing
+### Configuration
 
-Use the demo buttons in the frontend to manually trigger:
-- Error scenarios (frontend + backend)
-- Log messages at different severity levels
-- Distributed traces through the service mesh
-
-## Traffic Scenarios
-
-The simulator and auto-play feature run these weighted scenarios:
-
-| Scenario | Weight | Description |
-|----------|--------|-------------|
-| Browse Products | 35% | List and view products |
-| User Login | 20% | Authentication flow |
-| Checkout Flow | 15% | Full checkout with payment |
-| Search Products | 15% | Search and filter |
-| Update Profile | 10% | Profile preferences |
-| View Dashboard | 5% | Dashboard metrics |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSIONS_PER_MINUTE` | 2 | Browser sessions started per minute |
+| `TARGET_SESSION_DURATION` | 60 | Target duration per session (seconds) |
+| `MAX_CONCURRENT_BROWSERS` | 3 | Max concurrent Playwright browsers |
 
 ## Error Injection
 
@@ -172,40 +199,11 @@ Sessions use LaunchDarkly-punny email addresses:
 | `LD_SDK_KEY` | - | LaunchDarkly server-side SDK key |
 | `VITE_LD_CLIENT_SIDE_ID` | - | LaunchDarkly client-side ID |
 | `ENVIRONMENT` | development | Environment name |
-| `REQUESTS_PER_MINUTE` | 30 | Simulator request rate |
-| `ERROR_SESSION_RATE` | 0.15 | Percentage of sessions with errors |
-
-## Development
-
-### Running Locally (without Docker)
-
-**Backend services:**
-
-```bash
-cd backend
-pip install -r requirements.txt
-
-# Start each service (in separate terminals)
-cd services/api-gateway && python app.py
-cd services/auth-service && python app.py
-# ... etc
-```
-
-**Frontend:**
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-**Simulator:**
-
-```bash
-cd simulator
-pip install -r requirements.txt
-python traffic_generator.py
-```
+| `CHAT_ENABLED` | `false` | Enable AI chatbot (`true`/`false`) |
+| `OLLAMA_URL` | `http://ollama:11434` | Ollama server URL |
+| `SESSIONS_PER_MINUTE` | 2 | Simulator sessions per minute |
+| `TARGET_SESSION_DURATION` | 60 | Session duration (seconds) |
+| `MAX_CONCURRENT_BROWSERS` | 3 | Max concurrent browsers |
 
 ## Observability in LaunchDarkly
 
@@ -215,11 +213,13 @@ After running for a few minutes, you should see in your LaunchDarkly dashboard:
 2. **Errors**: Errors with source attribution (frontend/backend)
 3. **Logs**: Structured logs at different severity levels
 4. **Sessions**: User sessions with replay capability
+5. **AI Configs Monitoring** (when chat enabled): Token usage, latency, error rates, and user feedback per model variation
 
 ### Filtering Tips
 
 - Filter by `source: frontend` or `source: backend`
 - Filter by `service: payment-service` to see payment errors
+- Filter by `service: chat-service` to see LLM traces
 - Look for traces with errors to see where failures occur in the chain
 
 ## Troubleshooting
@@ -228,10 +228,10 @@ After running for a few minutes, you should see in your LaunchDarkly dashboard:
 
 ```bash
 # Check if all containers are running
-docker-compose ps
+docker compose ps
 
 # View logs for a specific service
-docker-compose logs api-gateway
+docker compose logs api-gateway
 ```
 
 ### No data in LaunchDarkly
@@ -240,13 +240,12 @@ docker-compose logs api-gateway
 2. Check service logs for connection errors
 3. Ensure your LaunchDarkly project has Observability enabled
 
-### Frontend not loading
+### Chat not working
 
-```bash
-# Rebuild the frontend
-docker-compose build frontend
-docker-compose up -d frontend
-```
+1. Check `CHAT_ENABLED=true` in `.env`
+2. Verify Ollama is running: `docker compose logs ollama` or `curl http://localhost:11434/api/tags`
+3. Check chat-service logs: `docker compose logs chat-service`
+4. On Mac, native Ollama is recommended for performance (Docker can't use Metal GPU)
 
 ## License
 

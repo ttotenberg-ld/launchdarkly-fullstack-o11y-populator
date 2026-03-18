@@ -32,30 +32,43 @@ load_dotenv()
 SERVICE_NAME = os.getenv('SERVICE_NAME', 'chat-service')
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '1.0.0')
 OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://ollama:11434')
+CHAT_ENABLED = os.getenv('CHAT_ENABLED', 'true').lower() in ('true', '1', 'yes')
 
 # IMPORTANT: Initialize LaunchDarkly FIRST to set up tracer provider
 client = create_ld_client(SERVICE_NAME, SERVICE_VERSION)
 
-# Initialize LD AI Client for AI Config retrieval + metric tracking
-import ldclient
-from ldai.client import LDAIClient, AICompletionConfigDefault, ModelConfig, LDMessage
-from ldai.tracker import TokenUsage, FeedbackKind
+MAINTENANCE_RESPONSE = (
+    "Our AI support assistant is currently down for scheduled maintenance. "
+    "Please contact our support team at support@toggleshop.io or try again later."
+)
 
-ai_client = LDAIClient(ldclient.get())
-print(f"  ✓ LDAIClient initialized for AI Configs")
+# Only initialize LLM infrastructure when chat is enabled
+ai_client = None
+ollama_client = None
 
-# Register OpenLLMetry Ollama instrumentation AFTER LD SDK but BEFORE making
-# LLM calls.  This auto-captures ollama.chat() as OpenTelemetry LLM spans
-# (model, prompts, responses, tokens) which flow to LD Observability → Traces.
-try:
-    from opentelemetry.instrumentation.ollama import OllamaInstrumentor
-    OllamaInstrumentor().instrument()
-    print(f"  ✓ OpenLLMetry Ollama instrumentation enabled")
-except ImportError:
-    print(f"  ⚠ opentelemetry-instrumentation-ollama not installed, LLM spans will not be auto-captured")
+if CHAT_ENABLED:
+    # Initialize LD AI Client for AI Config retrieval + metric tracking
+    import ldclient
+    from ldai.client import LDAIClient, AICompletionConfigDefault, ModelConfig, LDMessage
+    from ldai.tracker import TokenUsage, FeedbackKind
 
-# Now initialize ollama client
-import ollama as ollama_client
+    ai_client = LDAIClient(ldclient.get())
+    print(f"  ✓ LDAIClient initialized for AI Configs")
+
+    # Register OpenLLMetry Ollama instrumentation AFTER LD SDK but BEFORE making
+    # LLM calls.  This auto-captures ollama.chat() as OpenTelemetry LLM spans
+    # (model, prompts, responses, tokens) which flow to LD Observability → Traces.
+    try:
+        from opentelemetry.instrumentation.ollama import OllamaInstrumentor
+        OllamaInstrumentor().instrument()
+        print(f"  ✓ OpenLLMetry Ollama instrumentation enabled")
+    except ImportError:
+        print(f"  ⚠ opentelemetry-instrumentation-ollama not installed, LLM spans will not be auto-captured")
+
+    # Now initialize ollama client
+    import ollama as ollama_client
+else:
+    print(f"  ⚠ Chat is DISABLED (CHAT_ENABLED=false) — LLM features inactive, returning maintenance responses")
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -67,19 +80,22 @@ CORS(app, expose_headers=['traceparent', 'tracestate'],
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
 
-# Default AI Config fallback (used when LD is unreachable)
-DEFAULT_AI_CONFIG = AICompletionConfigDefault(
-    enabled=True,
-    model=ModelConfig(name="gemma3:1b"),
-    messages=[
-        LDMessage(
-            role="system",
-            content="You are a helpful customer support agent for an e-commerce store "
-                    "that sells developer tools and feature management products. "
-                    "Be concise, friendly, and helpful. Keep responses under 3 sentences.",
-        ),
-    ],
-)
+# Default AI Config fallback (used when LD is unreachable) — only needed when chat is enabled
+if CHAT_ENABLED:
+    DEFAULT_AI_CONFIG = AICompletionConfigDefault(
+        enabled=True,
+        model=ModelConfig(name="gemma3:1b"),
+        messages=[
+            LDMessage(
+                role="system",
+                content="You are a helpful customer support agent for an e-commerce store "
+                        "that sells developer tools and feature management products. "
+                        "Be concise, friendly, and helpful. Keep responses under 3 sentences.",
+            ),
+        ],
+    )
+else:
+    DEFAULT_AI_CONFIG = None
 
 # Regex to strip <think>...</think> blocks from DeepSeek R1 output
 THINK_TAG_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
@@ -174,6 +190,15 @@ def _strip_think_tags(text: str) -> str:
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
+    if not CHAT_ENABLED:
+        return jsonify({
+            'status': 'healthy',
+            'service': SERVICE_NAME,
+            'version': SERVICE_VERSION,
+            'chat_enabled': False,
+            'mode': 'maintenance',
+        })
+
     # Also check Ollama connectivity
     ollama_ok = False
     try:
@@ -186,6 +211,7 @@ def health():
         'status': 'healthy',
         'service': SERVICE_NAME,
         'version': SERVICE_VERSION,
+        'chat_enabled': True,
         'ollama_url': OLLAMA_URL,
         'ollama_connected': ollama_ok,
     })
@@ -202,6 +228,17 @@ def chat():
     with start_span('chat.completion') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
+
+        # When chat is disabled, return a maintenance message immediately
+        if not CHAT_ENABLED:
+            span.set_attribute('chat.mode', 'maintenance')
+            return jsonify({
+                'success': True,
+                'response': MAINTENANCE_RESPONSE,
+                'model': 'none',
+                'maintenance': True,
+                'service': SERVICE_NAME,
+            })
 
         data = request.get_json() or {}
         user_message = data.get('message', '').strip()
@@ -343,6 +380,9 @@ def chat_feedback():
     with start_span('chat.feedback') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
+
+        if not CHAT_ENABLED:
+            return jsonify({'success': True, 'attributed': False, 'maintenance': True})
 
         data = request.get_json() or {}
         generation_id = data.get('generation_id', '')
