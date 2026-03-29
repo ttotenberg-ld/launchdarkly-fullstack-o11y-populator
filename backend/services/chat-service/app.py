@@ -315,6 +315,12 @@ def chat():
                 duration_ms = ollama_duration / 1_000_000  # nanoseconds → ms
             tracker.track_duration(duration_ms)
 
+            # Time to first token = model load + prompt evaluation (before generation starts)
+            load_ns = response.get('load_duration', 0)
+            prompt_eval_ns = response.get('prompt_eval_duration', 0)
+            ttft_ms = (load_ns + prompt_eval_ns) / 1_000_000  # nanoseconds → ms
+            tracker.track_time_to_first_token(ttft_ms)
+
             span.set_attribute('llm.input_tokens', input_tokens)
             span.set_attribute('llm.output_tokens', output_tokens)
             span.set_attribute('llm.duration_ms', round(duration_ms, 1))
