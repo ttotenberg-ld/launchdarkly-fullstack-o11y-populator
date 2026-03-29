@@ -228,6 +228,8 @@ def chat():
     with start_span('chat.completion') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
+        span.set_attribute('gen_ai.operation.name', 'chat')
+        span.set_attribute('gen_ai.system', 'ollama')
 
         # When chat is disabled, return a maintenance message immediately
         if not CHAT_ENABLED:
@@ -262,6 +264,7 @@ def chat():
 
         model_name = config_value.model.name if config_value.model else 'gemma3:1b'
         span.set_attribute('llm.model', model_name)
+        span.set_attribute('gen_ai.request.model', model_name)
 
         # Build messages: system prompt from AI Config + user's message
         messages = []
@@ -315,6 +318,9 @@ def chat():
             span.set_attribute('llm.input_tokens', input_tokens)
             span.set_attribute('llm.output_tokens', output_tokens)
             span.set_attribute('llm.duration_ms', round(duration_ms, 1))
+            span.set_attribute('gen_ai.usage.input_tokens', input_tokens)
+            span.set_attribute('gen_ai.usage.output_tokens', output_tokens)
+            span.set_attribute('gen_ai.response.model', model_name)
 
             record_log(
                 f"Chat response: model={model_name}, tokens={input_tokens}+{output_tokens}, "
