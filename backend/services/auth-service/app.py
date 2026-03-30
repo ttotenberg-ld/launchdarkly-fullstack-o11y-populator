@@ -140,7 +140,7 @@ def login():
                 }
             })
         except Exception as e:
-            record_log(f"Failed to track login event: {e}", LEVELS['warning'], 
+            record_log(f"Failed to track login event: {e}", LEVELS['error'],
                        get_common_attributes(SERVICE_NAME, '/login'))
         
         span.set_attribute('login.success', True)

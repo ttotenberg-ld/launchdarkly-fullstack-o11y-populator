@@ -186,7 +186,7 @@ def process_payment():
                 'amount': amount,
             })
         except Exception as e:
-            record_log(f"Failed to send payment receipt: {e}", LEVELS['warning'],
+            record_log(f"Failed to send payment receipt: {e}", LEVELS['error'],
                        get_common_attributes(SERVICE_NAME, '/process'))
         
         return jsonify({

@@ -211,7 +211,7 @@ def checkout():
                 })
             except Exception as e:
                 # Non-critical - log but don't fail the order
-                record_log(f"Failed to send order confirmation: {e}", LEVELS['warning'], {
+                record_log(f"Failed to send order confirmation: {e}", LEVELS['error'], {
                     **get_common_attributes(SERVICE_NAME, '/checkout'),
                     'order_id': order_id,
                 })

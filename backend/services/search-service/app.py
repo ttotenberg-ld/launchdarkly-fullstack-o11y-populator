@@ -165,7 +165,7 @@ def search():
                     result['stock'] = inventory_resp.get('product', {}).get('stock', 0)
                     result['price'] = inventory_resp.get('product', {}).get('price', 0)
         except Exception as e:
-            record_log(f"Failed to enrich search results with inventory data: {e}", LEVELS['warning'],
+            record_log(f"Failed to enrich search results with inventory data: {e}", LEVELS['error'],
                        get_common_attributes(SERVICE_NAME, '/search'))
         
         return jsonify({

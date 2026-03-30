@@ -479,7 +479,7 @@ def get_product(product_id):
         product = PRODUCTS.get(product_id)
 
         if not product:
-            record_log(f"Product {product_id} not found", LEVELS['warning'], {
+            record_log(f"Product {product_id} not found", LEVELS['error'], {
                 **get_common_attributes(SERVICE_NAME, f'/products/{product_id}'),
                 'product_id': product_id,
             })
