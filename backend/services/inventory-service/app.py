@@ -184,28 +184,8 @@ def get_warehouse_api_version() -> str:
     return flag_value
 
 
-# Error scenarios for the stable v1 legacy warehouse API.
-# These represent rare, intermittent issues typical of aging infrastructure:
-# connection pool exhaustion, occasional query timeouts, etc.
-# Combined rate is ~1% to establish a realistic baseline error rate.
-WAREHOUSE_V1_ERRORS = [
-    {
-        "rate": 0.02,
-        "endpoints": ["*"],
-        "error_type": "WarehouseLegacyConnectionPoolError",
-        "message": "Warehouse API v1: connection pool exhausted (max_connections=50, active=50)",
-        "status_code": 503,
-        "latency": (2.0, 5.0),
-    },
-    {
-        "rate": 0.02,
-        "endpoints": ["/check", "/reserve"],
-        "error_type": "WarehouseLegacyQueryTimeoutError",
-        "message": "Warehouse API v1: SQL query timed out after 30s on inventory_ledger table",
-        "status_code": 504,
-        "latency": (4.0, 8.0),
-    },
-]
+# v1 (legacy) warehouse API is stable — no error injection.
+WAREHOUSE_V1_ERRORS = []
 
 
 # Error scenarios for the warehouse API v2 migration.
