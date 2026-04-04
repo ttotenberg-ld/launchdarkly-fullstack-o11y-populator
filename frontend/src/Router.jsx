@@ -37,6 +37,22 @@ function RouteErrorBoundary() {
         pathname: window.location.pathname,
       }
     );
+
+    // Also emit an explicit error-level log so it appears in LD's
+    // automatic "level=error" session filter (recordError creates an
+    // exception event, but not necessarily a level=error log entry).
+    LDObserve.recordLog(
+      `Frontend: Route not found — ${window.location.pathname} (${error?.status || 404})`,
+      'error',
+      {
+        source: 'frontend',
+        service: 'react-frontend',
+        component: 'RouteErrorBoundary',
+        errorType: 'NavigationError',
+        status: error?.status || 'unknown',
+        pathname: window.location.pathname,
+      }
+    );
   }, [error]);
 
   return (
