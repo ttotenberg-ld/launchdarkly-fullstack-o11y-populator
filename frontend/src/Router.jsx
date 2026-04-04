@@ -23,27 +23,10 @@ function RouteErrorBoundary() {
 
   useEffect(() => {
     const errorObj = error instanceof Error ? error : new Error(String(error?.statusText || error?.message || error));
-    console.error('Route error caught:', errorObj);
 
     LDObserve.recordError(
       errorObj,
-      'Frontend: Route navigation error',
-      {
-        source: 'frontend',
-        service: 'react-frontend',
-        component: 'RouteErrorBoundary',
-        errorType: 'NavigationError',
-        status: error?.status || 'unknown',
-        pathname: window.location.pathname,
-      }
-    );
-
-    // Also emit an explicit error-level log so it appears in LD's
-    // automatic "level=error" session filter (recordError creates an
-    // exception event, but not necessarily a level=error log entry).
-    LDObserve.recordLog(
       `Frontend: Route not found — ${window.location.pathname} (${error?.status || 404})`,
-      'error',
       {
         source: 'frontend',
         service: 'react-frontend',
