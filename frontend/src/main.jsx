@@ -18,6 +18,27 @@ import './index.css'
     // generate a random key for local dev. This keeps the LD client-side
     // context aligned with the X-User-* headers sent on API requests.
     const ldUser = typeof window !== 'undefined' ? window.__LD_USER__ : null;
+    const userKey = ldUser?.key || Math.random().toString(36).substr(2, 9);
+
+    // Fetch the session replay privacy flag BEFORE SDK init, because
+    // SessionReplay's privacySetting can only be set in the constructor.
+    // Uses LD's client-side eval endpoint (no SDK needed).
+    let privacySetting = 'none'; // fallback if fetch fails
+    try {
+      const evalResp = await fetch(
+        `https://clientsdk.launchdarkly.com/sdk/evalx/${clientSideID}/contexts/${btoa(JSON.stringify({ kind: 'user', key: userKey }))}`,
+        { headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(2000) }
+      );
+      if (evalResp.ok) {
+        const flags = await evalResp.json();
+        const flagData = flags['session-replay-privacy'];
+        if (flagData && ['none', 'default', 'strict'].includes(flagData.value)) {
+          privacySetting = flagData.value;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to fetch session-replay-privacy flag, using default:', e);
+    }
 
     // Start SDK initialization — this SYNCHRONOUSLY creates the OTel
     // TracerProvider and registers it globally, but the returned Promise
@@ -26,7 +47,7 @@ import './index.css'
       clientSideID,
       context: {
         kind: 'user',
-        key: ldUser?.key || Math.random().toString(36).substr(2, 9),
+        key: userKey,
         ...(ldUser && {
           name: ldUser.name,
           email: ldUser.email,
@@ -48,7 +69,7 @@ import './index.css'
             }
           }),
           new SessionReplay({
-            privacySetting: 'none',
+            privacySetting,
             inlineStylesheet: true
           })
         ]
