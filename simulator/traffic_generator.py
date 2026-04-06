@@ -393,6 +393,36 @@ class ComprehensiveSessionScenario:
             'timestamp': datetime.now().isoformat()
         }
     
+    async def _read_visible_variants(self, page: Page) -> tuple[str, str]:
+        """Read the visible frontend flag variants straight from the DOM.
+
+        The ProductCard component sets `data-layout-variant` on each card
+        and PromoBanner sets `data-variant` on the banner, so whatever the
+        user actually sees is authoritative.  Returns (layout, promo) with
+        sensible defaults when elements aren't present.
+        """
+        layout = 'standard'
+        try:
+            first_card = page.locator('[data-testid="product-card"]').first
+            if await first_card.count() > 0:
+                attr = await first_card.get_attribute('data-layout-variant')
+                if attr:
+                    layout = attr
+        except Exception:
+            pass
+
+        promo = 'none'
+        try:
+            banner = page.locator('[data-testid="promo-banner"]')
+            if await banner.count() > 0:
+                attr = await banner.get_attribute('data-variant')
+                if attr:
+                    promo = attr
+        except Exception:
+            pass
+
+        return layout, promo
+
     async def _phase_landing(self, page: Page, results: List[Dict]):
         """Land on homepage and look around."""
         # Navigate to home page
@@ -637,30 +667,112 @@ class ComprehensiveSessionScenario:
             pass
     
     async def _phase_checkout(self, page: Page, user: dict, results: List[Dict]):
-        """Add items to cart and go through checkout."""
+        """Add items to cart and go through checkout.
+
+        The simulator's add-to-cart and cart-size behavior is biased by the
+        visible flag variants so the metrics downstream actually move when
+        flags are flipped.  This is what makes the LD demo story show up:
+        without this, flipping a frontend flag does nothing to conversions
+        because the Playwright bot clicks everything deterministically.
+        """
         # Go back to products
         await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
         await HumanTypist.quick_glance()
 
-        # Click on a product
+        # Read the layout + promo variants directly from the DOM — this is
+        # literally what the user saw, not a re-eval of the flag.
+        layout_variant, promo_variant = await self._read_visible_variants(page)
+
+        # Bias add-to-cart probability per layout variant. Rationale:
+        #   - detailed: more info, social proof → users convert more
+        #   - minimal:  price hidden, fewer trust signals → users hesitate
+        #   - standard: baseline
+        add_to_cart_probability = {
+            'detailed': 0.92,
+            'standard': 0.80,
+            'minimal':  0.55,
+        }.get(layout_variant, 0.80)
+
+        # Promo banners nudge people to add more items (free-shipping
+        # threshold) or act faster (urgency). "percent-off" slightly lifts
+        # baseline add rate.
+        promo_add_bump = {
+            'free-shipping-50': 0.05,
+            'percent-off':      0.07,
+            'urgency':          0.10,
+            'none':             0.0,
+        }.get(promo_variant, 0.0)
+        add_to_cart_probability = min(0.99, add_to_cart_probability + promo_add_bump)
+
+        # Decide how many distinct products to add. free-shipping-50 pushes
+        # users to basket-build toward the threshold.
+        extra_item_rolls = {
+            'free-shipping-50': 2,  # try to add up to 3 items total
+            'percent-off':      1,
+            'urgency':          0,  # rushed, grab one and go
+            'none':             1,
+        }.get(promo_variant, 1)
+
+        # Click on a primary product
         product_cards = page.locator('[data-testid="product-card"]')
-        if await product_cards.count() > 0:
-            idx = random.randint(0, await product_cards.count() - 1)
+        card_count = await product_cards.count()
+        if card_count > 0:
+            idx = random.randint(0, card_count - 1)
             await HumanTypist.hesitate(0.5, 1.0)
             await product_cards.nth(idx).click()
-            
+
             try:
                 await page.wait_for_selector('[data-testid="product-detail"]', timeout=10000)
                 await HumanTypist.read_page(1, 2)
-                
-                # Add to cart
-                add_btn = page.locator('[data-testid="add-to-cart"]')
-                if await add_btn.count() > 0:
-                    await HumanClicker.click_with_hesitation(page, '[data-testid="add-to-cart"]')
-                    await HumanTypist.hesitate(0.5, 1.0)
-                    results.append({'action': 'add_to_cart', 'success': True, 'phase': 'checkout'})
+
+                # Bias: sometimes bail without adding to cart
+                if random.random() < add_to_cart_probability:
+                    add_btn = page.locator('[data-testid="add-to-cart"]')
+                    if await add_btn.count() > 0:
+                        await HumanClicker.click_with_hesitation(page, '[data-testid="add-to-cart"]')
+                        await HumanTypist.hesitate(0.5, 1.0)
+                        results.append({
+                            'action': 'add_to_cart',
+                            'success': True,
+                            'phase': 'checkout',
+                            'layout_variant': layout_variant,
+                            'promo_variant': promo_variant,
+                        })
+                else:
+                    results.append({
+                        'action': 'skip_add_to_cart',
+                        'success': True,
+                        'phase': 'checkout',
+                        'layout_variant': layout_variant,
+                        'promo_variant': promo_variant,
+                        'reason': 'variant_bias',
+                    })
             except:
                 pass
+
+        # Optionally add extra items to basket (basket-build behavior).
+        for _ in range(extra_item_rolls):
+            if random.random() > add_to_cart_probability * 0.7:
+                continue
+            try:
+                await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
+                extra_cards = page.locator('[data-testid="product-card"]')
+                extra_count = await extra_cards.count()
+                if extra_count == 0:
+                    break
+                extra_idx = random.randint(0, extra_count - 1)
+                await extra_cards.nth(extra_idx).click()
+                await page.wait_for_selector('[data-testid="add-to-cart"]', timeout=5000)
+                await HumanTypist.hesitate(0.3, 0.7)
+                await HumanClicker.click_with_hesitation(page, '[data-testid="add-to-cart"]')
+                results.append({
+                    'action': 'add_extra_to_cart',
+                    'success': True,
+                    'phase': 'checkout',
+                    'promo_variant': promo_variant,
+                })
+            except:
+                break
         
         # Go to cart
         try:

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useFlags } from 'launchdarkly-react-client-sdk';
+import { LDObserve } from '@launchdarkly/observability';
 import { api } from '../services/api';
 import ProductCard from '../components/products/ProductCard';
 
@@ -9,6 +11,8 @@ export default function Products() {
   const [error, setError] = useState(null);
   const [searchParams] = useSearchParams();
   const searchQuery = searchParams.get('q');
+  const flags = useFlags();
+  const layoutVariant = flags['product-card-layout'] || 'standard';
 
   useEffect(() => {
     async function loadProducts() {
@@ -21,9 +25,27 @@ export default function Products() {
         } else {
           result = await api.listProducts();
         }
-        
+
         if (result.success) {
-          setProducts(result.data.products || result.data.results || []);
+          const items = result.data.products || result.data.results || [];
+          setProducts(items);
+
+          // Funnel metric: record search submission + result count.
+          if (searchQuery) {
+            LDObserve.recordCount({
+              name: 'app.search.submitted_total',
+              value: 1,
+              attributes: {
+                had_results: items.length > 0 ? 'true' : 'false',
+                layout_variant: layoutVariant,
+              },
+            });
+            LDObserve.recordHistogram({
+              name: 'app.search.result_count',
+              value: items.length,
+              attributes: { layout_variant: layoutVariant },
+            });
+          }
         } else {
           setError('Failed to load products');
         }
@@ -35,7 +57,7 @@ export default function Products() {
       }
     }
     loadProducts();
-  }, [searchQuery]);
+  }, [searchQuery, layoutVariant]);
 
   return (
     <div className="products-page" data-testid="products-page">

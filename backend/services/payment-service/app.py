@@ -12,7 +12,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-from ldobserve.observe import record_log, record_exception, start_span, LEVELS
+from ldobserve.observe import (
+    record_log,
+    record_exception,
+    start_span,
+    record_count,
+    record_histogram,
+    LEVELS,
+)
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -174,6 +181,27 @@ def process_payment():
             'transaction_id': transaction_id,
             'amount': amount,
             'status': 'completed',
+        })
+
+        # Bucket the amount for dimensional analysis without blowing up cardinality.
+        if amount < 50:
+            amount_bucket = '0-50'
+        elif amount < 100:
+            amount_bucket = '50-100'
+        elif amount < 200:
+            amount_bucket = '100-200'
+        else:
+            amount_bucket = '200+'
+
+        record_count('app.payment.processed_total', 1, {
+            'success': 'true',
+            'currency': currency,
+            'amount_bucket': amount_bucket,
+            'user_plan': (user or {}).get('plan', 'unknown'),
+        })
+        record_histogram('app.payment.amount_usd', float(amount), {
+            'currency': currency,
+            'user_plan': (user or {}).get('plan', 'unknown'),
         })
         
         # Send receipt notification

@@ -12,7 +12,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-from ldobserve.observe import record_log, record_exception, start_span, LEVELS
+from ldobserve.observe import (
+    record_log,
+    record_exception,
+    start_span,
+    record_count,
+    record_histogram,
+    LEVELS,
+)
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -125,13 +132,29 @@ def checkout():
         data = request.get_json() or {}
         user = data.get('user', get_random_user())
         items = data.get('items', random.sample(PRODUCTS, k=random.randint(1, 3)))
-        
+
+        # Frontend-supplied flag variants (the variant the user actually saw
+        # at checkout time).  Used to tag business metrics so flag impact on
+        # revenue/funnel is attributable in LD.
+        layout_variant = data.get('layout_variant', 'unknown')
+        promo_variant = data.get('promo_variant', 'unknown')
+
         order_id = f"ord_{uuid.uuid4().hex[:12]}"
         total = sum(item.get('price', 0) for item in items)
-        
+
         span.set_attribute('order_id', order_id)
         span.set_attribute('item_count', len(items))
         span.set_attribute('total', total)
+        span.set_attribute('layout_variant', layout_variant)
+        span.set_attribute('promo_variant', promo_variant)
+
+        # Common attributes applied to every business metric for this order,
+        # so flag variants are attributable downstream.
+        metric_attrs = {
+            'layout_variant': layout_variant,
+            'promo_variant': promo_variant,
+            'user_plan': (user or {}).get('plan', 'unknown'),
+        }
         
         record_log(f"Processing checkout for order {order_id}", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, '/checkout'),
@@ -158,7 +181,17 @@ def checkout():
                     'items': [{'product_id': item['id'], 'quantity': 1} for item in items],
                 })
                 inv_span.set_attribute('reservation.success', inventory_result.get('success', False))
+                record_count('app.checkout.funnel_step_total', 1, {
+                    **metric_attrs,
+                    'step': 'reserve_inventory',
+                    'success': 'true',
+                })
             except Exception as e:
+                record_count('app.checkout.funnel_step_total', 1, {
+                    **metric_attrs,
+                    'step': 'reserve_inventory',
+                    'success': 'false',
+                })
                 record_log(f"Inventory reservation failed for order {order_id}: {e}", LEVELS['error'], {
                     **get_common_attributes(SERVICE_NAME, '/checkout'),
                     'order_id': order_id,
@@ -187,7 +220,17 @@ def checkout():
                     'user': user,
                 })
                 pay_span.set_attribute('payment.success', payment_result.get('success', False))
+                record_count('app.checkout.funnel_step_total', 1, {
+                    **metric_attrs,
+                    'step': 'process_payment',
+                    'success': 'true',
+                })
             except Exception as e:
+                record_count('app.checkout.funnel_step_total', 1, {
+                    **metric_attrs,
+                    'step': 'process_payment',
+                    'success': 'false',
+                })
                 record_log(f"Payment processing failed for order {order_id}: {e}", LEVELS['error'], {
                     **get_common_attributes(SERVICE_NAME, '/checkout'),
                     'order_id': order_id,
@@ -222,6 +265,15 @@ def checkout():
             'total': total,
             'status': 'completed',
         })
+
+        # Revenue metrics — the core business outcomes.  Tagged with the
+        # flag variants the user saw so you can correlate flag state with
+        # orders and revenue in LD.
+        record_count('app.order.placed_total', 1, {
+            **metric_attrs,
+            'item_count': str(len(items)),
+        })
+        record_histogram('app.order.value_usd', float(total), metric_attrs)
         
         return jsonify({
             'success': True,

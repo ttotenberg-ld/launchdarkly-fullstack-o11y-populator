@@ -25,7 +25,13 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-from ldobserve.observe import record_log, record_exception, start_span, LEVELS
+from ldobserve.observe import (
+    record_log,
+    record_exception,
+    start_span,
+    record_count,
+    LEVELS,
+)
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -287,6 +293,11 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
                     },
                 )
                 time.sleep(latency)
+                record_count('app.inventory.warehouse_error_total', 1, {
+                    'warehouse_api_version': api_version,
+                    'error_type': scenario['error_type'],
+                    'endpoint': endpoint,
+                })
                 return WarehouseAPIError(
                     message=scenario["message"],
                     error_type=scenario["error_type"],
@@ -317,6 +328,11 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
                 },
             )
             time.sleep(latency)
+            record_count('app.inventory.warehouse_error_total', 1, {
+                'warehouse_api_version': api_version,
+                'error_type': scenario['error_type'],
+                'endpoint': endpoint,
+            })
 
             return WarehouseAPIError(
                 message=scenario["message"],

@@ -16,6 +16,8 @@ const FLAG_KEYS = [
   { key: 'showNewFeatures',       defaultValue: false },
   { key: 'showNewHero',           defaultValue: false },
   { key: 'migrate-warehouse-api', defaultValue: 'v1' },
+  { key: 'product-card-layout',   defaultValue: 'standard' },
+  { key: 'promo-banner',          defaultValue: 'none' },
 ];
 
 function App() {

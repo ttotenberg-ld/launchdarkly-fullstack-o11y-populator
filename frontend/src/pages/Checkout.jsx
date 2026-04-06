@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useFlags } from 'launchdarkly-react-client-sdk';
+import { LDObserve } from '@launchdarkly/observability';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
@@ -11,10 +13,45 @@ export default function Checkout() {
   const [shippingData, setShippingData] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState(null);
-  
+
   const { cartItems, cartTotal, clearCart } = useCart();
   const { user } = useAuth();
+  const flags = useFlags();
+  const layoutVariant = flags['product-card-layout'] || 'standard';
+  const promoVariant = flags['promo-banner'] || 'none';
   const navigate = useNavigate();
+
+  // Funnel: record checkout_started exactly once when the page mounts with
+  // a non-empty cart. Also record cart_size as a histogram for distribution.
+  const startedRef = useRef(false);
+  useEffect(() => {
+    if (startedRef.current) return;
+    if (cartItems.length === 0) return;
+    startedRef.current = true;
+
+    const itemCount = cartItems.reduce((n, i) => n + (i.quantity || 1), 0);
+
+    const variantAttrs = {
+      layout_variant: layoutVariant,
+      promo_variant: promoVariant,
+    };
+
+    LDObserve.recordCount({
+      name: 'app.checkout.started_total',
+      value: 1,
+      attributes: variantAttrs,
+    });
+    LDObserve.recordHistogram({
+      name: 'app.cart.size',
+      value: itemCount,
+      attributes: variantAttrs,
+    });
+    LDObserve.recordHistogram({
+      name: 'app.cart.value_usd',
+      value: Number(cartTotal.toFixed(2)),
+      attributes: variantAttrs,
+    });
+  }, [cartItems, cartTotal, layoutVariant, promoVariant]);
 
   const handleShippingSubmit = (data) => {
     setShippingData(data);
@@ -40,7 +77,10 @@ export default function Checkout() {
         total: cartTotal * 1.08,
       };
 
-      const result = await api.checkout(orderData.user, orderData.items);
+      const result = await api.checkout(orderData.user, orderData.items, {
+        layout_variant: layoutVariant,
+        promo_variant: promoVariant,
+      });
       
       if (result.success) {
         clearCart();

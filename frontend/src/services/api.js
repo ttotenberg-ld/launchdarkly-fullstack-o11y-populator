@@ -168,12 +168,14 @@ export const api = {
     body: JSON.stringify({ query }),
   }),
   
-  // Checkout
-  checkout: (user, items) => request('/api/checkout', {
+  // Checkout — extras may include flag-variant attributes so backend
+  // metrics can be correlated with the UI the user actually saw.
+  checkout: (user, items, extras = {}) => request('/api/checkout', {
     method: 'POST',
-    body: JSON.stringify({ 
+    body: JSON.stringify({
       user: user || getRandomUser(),
       items: items || getRandomCart(),
+      ...extras,
     }),
   }),
   
