@@ -318,6 +318,7 @@ class ComprehensiveSessionScenario:
         self.target_duration = target_duration
         self.endpoints_hit = set()
         self.api_errors = 0  # HTTP errors seen during this session
+        self.warehouse_variation = None  # 'v1' | 'v2' | 'v3' | None
 
     async def execute(self, page: Page, user: dict) -> Dict[str, Any]:
         """Execute a comprehensive user session with a hard timeout."""
@@ -325,6 +326,7 @@ class ComprehensiveSessionScenario:
         start_time = datetime.now()
         self.endpoints_hit = set()
         self.api_errors = 0
+        self.warehouse_variation = None
 
         # Track HTTP error responses from the backend so feedback
         # sentiment can be weighted by the user's actual experience.
@@ -871,14 +873,84 @@ class ComprehensiveSessionScenario:
         
         results.append({'action': 'fill_payment', 'success': True, 'phase': 'checkout'})
     
+    async def _read_warehouse_variation(self, page: Page) -> Optional[str]:
+        """Read the current migrate-warehouse-api variation from the
+        frontend LD client. Cached per-session on self.warehouse_variation."""
+        if self.warehouse_variation is not None:
+            return self.warehouse_variation
+        try:
+            variation = await page.evaluate(
+                """() => {
+                    if (typeof window.__getLDVariation === 'function') {
+                        return window.__getLDVariation('migrate-warehouse-api', null);
+                    }
+                    return null;
+                }"""
+            )
+            if isinstance(variation, str):
+                self.warehouse_variation = variation
+        except Exception:
+            self.warehouse_variation = None
+        return self.warehouse_variation
+
+    def _sentiment_weights_3way(self) -> List[float]:
+        """Pick (positive, neutral, negative) weights by warehouse variation
+        and per-session error count. Dashboard slices feedback by flag
+        variation, so the skew must come from the variation itself — not
+        only from errors observed in this specific session.
+        """
+        variation = self.warehouse_variation
+        errors = self.api_errors
+        if variation == 'v2':
+            # Unstable warehouse: heavy negative skew even with no
+            # observed errors this session, because the cohort is
+            # generally unhappy.
+            if errors >= 3:
+                return [0.02, 0.08, 0.90]
+            if errors >= 1:
+                return [0.05, 0.15, 0.80]
+            return [0.15, 0.25, 0.60]
+        if variation == 'v3':
+            # Stable new warehouse: very positive
+            if errors >= 1:
+                return [0.55, 0.30, 0.15]
+            return [0.78, 0.18, 0.04]
+        # v1 (legacy, ~1% background errors) or unknown
+        if errors >= 3:
+            return [0.05, 0.10, 0.85]
+        if errors >= 1:
+            return [0.20, 0.30, 0.50]
+        return [0.65, 0.28, 0.07]
+
+    def _sentiment_weights_2way(self) -> List[float]:
+        """Pick (positive, negative) weights for chat thumbs up/down."""
+        variation = self.warehouse_variation
+        errors = self.api_errors
+        if variation == 'v2':
+            if errors >= 3:
+                return [0.08, 0.92]
+            if errors >= 1:
+                return [0.15, 0.85]
+            return [0.30, 0.70]
+        if variation == 'v3':
+            if errors >= 1:
+                return [0.70, 0.30]
+            return [0.88, 0.12]
+        if errors >= 3:
+            return [0.15, 0.85]
+        if errors >= 1:
+            return [0.40, 0.60]
+        return [0.78, 0.22]
+
     async def _phase_feedback(self, page: Page, results: List[Dict]):
         """Submit qualitative feedback via the LD SDK.
 
-        Sentiment is weighted by how many HTTP 5xx errors the user saw
-        during this session:
-          - 0 errors:  60% positive, 30% neutral, 10% negative
-          - 1-2 errors: 20% positive, 30% neutral, 50% negative
-          - 3+ errors: 5% positive, 10% neutral, 85% negative
+        Sentiment is weighted by the active `migrate-warehouse-api` variation
+        (read from the frontend LD client) combined with how many HTTP 5xx
+        errors the user saw this session. Weighting by variation — not just
+        observed errors — is what makes the LD dashboard's per-variation
+        sentiment distribution actually differ between v1/v2/v3, since most
+        sessions don't deep-funnel into warehouse calls.
 
         ~80% of sessions leave feedback to generate a healthy volume.
         """
@@ -886,22 +958,11 @@ class ComprehensiveSessionScenario:
             # 20% of sessions skip feedback entirely
             return
 
-        # Choose sentiment based on errors observed
-        if self.api_errors == 0:
-            sentiment = random.choices(
-                ['positive', 'neutral', 'negative'],
-                weights=[0.60, 0.30, 0.10],
-            )[0]
-        elif self.api_errors <= 2:
-            sentiment = random.choices(
-                ['positive', 'neutral', 'negative'],
-                weights=[0.20, 0.30, 0.50],
-            )[0]
-        else:
-            sentiment = random.choices(
-                ['positive', 'neutral', 'negative'],
-                weights=[0.05, 0.10, 0.85],
-            )[0]
+        await self._read_warehouse_variation(page)
+        sentiment = random.choices(
+            ['positive', 'neutral', 'negative'],
+            weights=self._sentiment_weights_3way(),
+        )[0]
 
         # Pick feedback text matching sentiment
         if sentiment == 'positive':
@@ -1009,25 +1070,15 @@ class ComprehensiveSessionScenario:
                 await HumanTypist.hesitate(0.5, 1.0)
 
         # Submit thumbs up/down feedback on the last bot response (~70% of
-        # chatbot users give feedback).  Sentiment is weighted by how many
-        # API errors were seen during the session, similar to _phase_feedback.
+        # chatbot users give feedback). Sentiment is weighted by the active
+        # `migrate-warehouse-api` variation + per-session error count, same
+        # as _phase_feedback, so v2 users skew negative in the cohort view.
         if random.random() < 0.70:
-            # Decide sentiment based on error count
-            if self.api_errors == 0:
-                sentiment = random.choices(
-                    ['positive', 'negative'],
-                    weights=[0.75, 0.25],
-                )[0]
-            elif self.api_errors <= 2:
-                sentiment = random.choices(
-                    ['positive', 'negative'],
-                    weights=[0.40, 0.60],
-                )[0]
-            else:
-                sentiment = random.choices(
-                    ['positive', 'negative'],
-                    weights=[0.15, 0.85],
-                )[0]
+            await self._read_warehouse_variation(page)
+            sentiment = random.choices(
+                ['positive', 'negative'],
+                weights=self._sentiment_weights_2way(),
+            )[0]
 
             try:
                 feedback_sent = await page.evaluate(

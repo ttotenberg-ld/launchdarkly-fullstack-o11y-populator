@@ -162,8 +162,21 @@ export default function FeedbackWidget() {
     window.__submitFeedback = (flagKey, sentimentVal, text) => {
       return sendFeedback(flagKey, sentimentVal, text);
     };
-    return () => { delete window.__submitFeedback; };
-  }, [sendFeedback]);
+    // Narrow helper so the simulator can read flag variations (e.g.
+    // migrate-warehouse-api) and skew feedback sentiment by variation
+    // instead of only by per-session observed errors.
+    window.__getLDVariation = (flagKey, fallback) => {
+      try {
+        return ldClient?.variation(flagKey, fallback);
+      } catch (_e) {
+        return fallback;
+      }
+    };
+    return () => {
+      delete window.__submitFeedback;
+      delete window.__getLDVariation;
+    };
+  }, [sendFeedback, ldClient]);
 
   const handleSubmit = () => {
     if (!sentiment || !feedback.trim()) return;
