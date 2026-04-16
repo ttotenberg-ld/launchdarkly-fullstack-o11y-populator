@@ -740,6 +740,19 @@ class ComprehensiveSessionScenario:
                             'layout_variant': layout_variant,
                             'promo_variant': promo_variant,
                         })
+                        # Ambient rage: low baseline probability, bumped
+                        # heavily by warehouse variation + observed errors.
+                        # Simulates "the button isn't working" frustration.
+                        await self._read_warehouse_variation(page)
+                        if self._should_rage_click(base_probability=0.0):
+                            await self._rage_click_locator(
+                                page,
+                                add_btn.first,
+                                results,
+                                reason='add_to_cart_unresponsive',
+                                count=7,
+                                duration_ms=1000,
+                            )
                 else:
                     results.append({
                         'action': 'skip_add_to_cart',
@@ -826,7 +839,18 @@ class ComprehensiveSessionScenario:
                         results.append({'action': 'order_confirmed', 'success': True, 'phase': 'checkout'})
                         await HumanTypist.read_page(2, 3)
                     except:
-                        pass
+                        # Order confirmation never appeared — a very natural
+                        # moment for a frustrated user to rage-click the
+                        # "Place Order" button. Probability is bumped by
+                        # warehouse variation + observed errors.
+                        await self._read_warehouse_variation(page)
+                        if self._should_rage_click(base_probability=0.20):
+                            await self._rage_click_locator(
+                                page,
+                                place_order_btn,
+                                results,
+                                reason='order_confirmation_missing',
+                            )
         except Exception as e:
             results.append({'action': 'checkout', 'success': False, 'error': str(e), 'phase': 'checkout'})
     
@@ -873,6 +897,76 @@ class ComprehensiveSessionScenario:
         
         results.append({'action': 'fill_payment', 'success': True, 'phase': 'checkout'})
     
+    async def _rage_click_locator(
+        self,
+        page: Page,
+        locator,
+        results: List[Dict],
+        reason: str,
+        count: int = 8,
+        duration_ms: int = 1200,
+    ) -> bool:
+        """Perform rapid-fire clicks on a single element to trigger LD's
+        server-side rage click detection.
+
+        LD thresholds: >=5 clicks within 2s inside an 8px radius. We aim
+        well above: 8 clicks over ~1.2s on the element's exact center
+        pixel (mouse.click with fixed coords keeps every click pixel-
+        identical — well inside the 8px tolerance).
+        """
+        try:
+            # Scroll into view before measuring so bounding_box is valid
+            try:
+                await locator.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            box = await locator.bounding_box()
+            if not box:
+                return False
+            cx = box['x'] + box['width'] / 2
+            cy = box['y'] + box['height'] / 2
+            interval_s = max(0.05, (duration_ms / 1000) / count)
+            for _ in range(count):
+                await page.mouse.click(cx, cy, delay=10)
+                await asyncio.sleep(interval_s)
+            results.append({
+                'action': 'rage_click',
+                'phase': 'rage',
+                'reason': reason,
+                'clicks': count,
+                'duration_ms': duration_ms,
+                'warehouse_variation': self.warehouse_variation,
+                'api_errors_seen': self.api_errors,
+            })
+            return True
+        except Exception as e:
+            results.append({
+                'action': 'rage_click',
+                'phase': 'rage',
+                'reason': reason,
+                'success': False,
+                'error': str(e),
+            })
+            return False
+
+    def _should_rage_click(self, base_probability: float = 0.0) -> bool:
+        """Decide whether to rage-click at a given hook point, based on
+        warehouse variation and observed API errors. v2 users rage more;
+        users who've already hit 5xx errors rage a lot more."""
+        variation = self.warehouse_variation
+        errors = self.api_errors
+        p = base_probability
+        if variation == 'v2':
+            p += 0.15
+        elif variation == 'v1':
+            p += 0.03
+        # v3: no ambient bump
+        if errors >= 3:
+            p += 0.45
+        elif errors >= 1:
+            p += 0.18
+        return random.random() < min(p, 0.95)
+
     async def _read_warehouse_variation(self, page: Page) -> Optional[str]:
         """Read the current migrate-warehouse-api variation from the
         frontend LD client. Cached per-session on self.warehouse_variation."""
