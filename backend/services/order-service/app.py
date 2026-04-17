@@ -25,9 +25,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
+from shared.db import get_engine, install_trace_attributes
 from shared.users import get_random_user
 
 from shared.service_names import get_service_url
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -47,7 +49,12 @@ CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
 
-# Sample products
+# Postgres engine (auto-instrumented: every SQL statement becomes a span).
+engine = get_engine(default_db='orderdb')
+install_trace_attributes(engine, SERVICE_NAME)
+
+# Small in-memory fallback catalogue used only when checkout is called
+# without explicit items (sparingly, for demo paths).
 PRODUCTS = [
     {'id': 'prod_001', 'name': 'Feature Flag Starter Kit', 'price': 29.99},
     {'id': 'prod_002', 'name': 'Progressive Rollout Pro', 'price': 49.99},
@@ -141,12 +148,50 @@ def checkout():
 
         order_id = f"ord_{uuid.uuid4().hex[:12]}"
         total = sum(item.get('price', 0) for item in items)
+        total_cents = int(round(total * 100))
 
         span.set_attribute('order_id', order_id)
         span.set_attribute('item_count', len(items))
         span.set_attribute('total', total)
         span.set_attribute('layout_variant', layout_variant)
         span.set_attribute('promo_variant', promo_variant)
+
+        # Persist the pending order BEFORE downstream calls, so even failed
+        # checkouts produce an auditable row (and a BEGIN/INSERT/COMMIT
+        # span tree at the top of the trace).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO orders "
+                    "  (id, user_key, user_email, user_plan, layout_variant, "
+                    "   promo_variant, total_cents, status) "
+                    "VALUES (:id, :uk, :ue, :up, :lv, :pv, :tc, 'pending')"
+                ),
+                {
+                    'id': order_id,
+                    'uk': (user or {}).get('key', 'unknown'),
+                    'ue': (user or {}).get('email'),
+                    'up': (user or {}).get('plan', 'unknown'),
+                    'lv': layout_variant,
+                    'pv': promo_variant,
+                    'tc': total_cents,
+                },
+            )
+            for item in items:
+                conn.execute(
+                    text(
+                        "INSERT INTO order_items "
+                        "  (order_id, product_id, product_name, quantity, price_cents) "
+                        "VALUES (:oid, :pid, :pname, :qty, :pc)"
+                    ),
+                    {
+                        'oid': order_id,
+                        'pid': item.get('id'),
+                        'pname': item.get('name'),
+                        'qty': int(item.get('quantity', 1)),
+                        'pc': int(round(float(item.get('price', 0)) * 100)),
+                    },
+                )
 
         # Common attributes applied to every business metric for this order,
         # so flag variants are attributable downstream.
@@ -259,6 +304,16 @@ def checkout():
                     'order_id': order_id,
                 })
         
+        # Mark the order complete in the DB (UPDATE span on the trace)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE orders SET status = 'completed', completed_at = NOW() "
+                    "WHERE id = :id"
+                ),
+                {'id': order_id},
+            )
+
         record_log(f"Order {order_id} completed successfully", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, '/checkout'),
             'order_id': order_id,
@@ -290,31 +345,58 @@ def checkout():
 
 @app.route('/orders', methods=['GET'])
 def list_orders():
-    """List recent orders."""
+    """List recent orders (reads from orderdb — two-query pattern: orders
+    then line-items per order, which produces a visible N+1 shape in the
+    trace when N grows.  Kept simple deliberately — realism > perfection.)"""
     with start_span('order.list') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
-        
-        # Simulate database query
-        time.sleep(0.2)
 
-        # Generate some sample orders
-        orders = []
-        for i in range(5):
-            user = get_random_user()
-            items = random.sample(PRODUCTS, k=random.randint(1, 3))
-            orders.append({
-                'id': f"ord_{uuid.uuid4().hex[:12]}",
-                'user': user,
-                'items': items,
-                'total': sum(item['price'] for item in items),
-                'status': random.choice(['completed', 'processing', 'shipped']),
-                'created_at': f"2024-12-0{i+1}T10:30:00Z",
-            })
-        
-        record_log(f"Retrieved {len(orders)} orders", LEVELS['info'], 
+        limit = int(request.args.get('limit', 10))
+
+        with engine.connect() as conn:
+            order_rows = conn.execute(
+                text(
+                    "SELECT id, user_key, user_email, user_plan, total_cents, "
+                    "       status, created_at, completed_at "
+                    "FROM orders ORDER BY created_at DESC LIMIT :lim"
+                ),
+                {'lim': limit},
+            ).fetchall()
+
+            orders = []
+            for row in order_rows:
+                item_rows = conn.execute(
+                    text(
+                        "SELECT product_id, product_name, quantity, price_cents "
+                        "FROM order_items WHERE order_id = :oid"
+                    ),
+                    {'oid': row.id},
+                ).fetchall()
+                orders.append({
+                    'id': row.id,
+                    'user': {
+                        'key': row.user_key,
+                        'email': row.user_email,
+                        'plan': row.user_plan,
+                    },
+                    'items': [
+                        {
+                            'id': ir.product_id,
+                            'name': ir.product_name,
+                            'quantity': ir.quantity,
+                            'price': (ir.price_cents or 0) / 100.0,
+                        }
+                        for ir in item_rows
+                    ],
+                    'total': (row.total_cents or 0) / 100.0,
+                    'status': row.status,
+                    'created_at': row.created_at.isoformat() if row.created_at else None,
+                })
+
+        record_log(f"Retrieved {len(orders)} orders", LEVELS['info'],
                    get_common_attributes(SERVICE_NAME, '/orders'))
-        
+
         return jsonify({
             'success': True,
             'service': SERVICE_NAME,
@@ -324,26 +406,58 @@ def list_orders():
 
 @app.route('/orders/<order_id>', methods=['GET'])
 def get_order(order_id):
-    """Get order details."""
+    """Get order details from orderdb."""
     with start_span('order.get') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
         span.set_attribute('order_id', order_id)
-        
-        time.sleep(0.1)
-        
-        user = get_random_user()
-        items = random.sample(PRODUCTS, k=random.randint(1, 3))
-        
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id, user_key, user_email, user_plan, total_cents, "
+                    "       status, created_at, completed_at "
+                    "FROM orders WHERE id = :oid"
+                ),
+                {'oid': order_id},
+            ).fetchone()
+
+            if not row:
+                return jsonify({
+                    'success': False,
+                    'error': 'OrderNotFound',
+                    'message': f'Order {order_id} not found',
+                }), 404
+
+            item_rows = conn.execute(
+                text(
+                    "SELECT product_id, product_name, quantity, price_cents "
+                    "FROM order_items WHERE order_id = :oid"
+                ),
+                {'oid': order_id},
+            ).fetchall()
+
         return jsonify({
             'success': True,
             'service': SERVICE_NAME,
             'order': {
-                'id': order_id,
-                'user': user,
-                'items': items,
-                'total': sum(item['price'] for item in items),
-                'status': 'completed',
+                'id': row.id,
+                'user': {
+                    'key': row.user_key,
+                    'email': row.user_email,
+                    'plan': row.user_plan,
+                },
+                'items': [
+                    {
+                        'id': ir.product_id,
+                        'name': ir.product_name,
+                        'quantity': ir.quantity,
+                        'price': (ir.price_cents or 0) / 100.0,
+                    }
+                    for ir in item_rows
+                ],
+                'total': (row.total_cents or 0) / 100.0,
+                'status': row.status,
             }
         })
 

@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
 from shared.users import get_random_user, get_user_context
+from shared.db import get_engine, install_trace_attributes
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -79,6 +81,68 @@ CORS(app, expose_headers=['traceparent', 'tracestate'],
 
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
+
+# chatdb holds conversation history — independent of CHAT_ENABLED so the DB
+# dependency is the same in both modes. Writes are gated on CHAT_ENABLED below.
+engine = get_engine(default_db='chatdb')
+install_trace_attributes(engine, SERVICE_NAME)
+
+
+def db_upsert_conversation(conversation_id: str, user_key: str, model: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO conversations (id, user_key, model, started_at, last_msg_at)
+                VALUES (:id, :user_key, :model, NOW(), NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    last_msg_at = NOW(),
+                    model       = EXCLUDED.model
+            """),
+            {'id': conversation_id, 'user_key': user_key, 'model': model},
+        )
+
+
+def db_insert_messages(conversation_id: str, user_msg: str, assistant_msg: str,
+                       generation_id: str, input_tokens: int, output_tokens: int,
+                       duration_ms: float) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO messages (conversation_id, role, content)
+                VALUES (:conv, 'user', :content)
+            """),
+            {'conv': conversation_id, 'content': user_msg},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO messages (
+                    conversation_id, role, content, generation_id,
+                    input_tokens, output_tokens, duration_ms
+                ) VALUES (
+                    :conv, 'assistant', :content, :gen_id,
+                    :in_tok, :out_tok, :dur
+                )
+            """),
+            {
+                'conv': conversation_id,
+                'content': assistant_msg,
+                'gen_id': generation_id,
+                'in_tok': input_tokens,
+                'out_tok': output_tokens,
+                'dur': int(round(duration_ms)),
+            },
+        )
+
+
+def db_insert_feedback(generation_id: str, sentiment: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO chat_feedback (generation_id, sentiment)
+                VALUES (:gen_id, :sentiment)
+            """),
+            {'gen_id': generation_id, 'sentiment': sentiment},
+        )
 
 # Default AI Config fallback (used when LD is unreachable) — only needed when chat is enabled
 if CHAT_ENABLED:
@@ -247,6 +311,10 @@ def chat():
         if not user_message:
             return jsonify({'success': False, 'error': 'No message provided'}), 400
 
+        # Frontend threads by passing back the conversation_id we returned last
+        # time; if absent, we start a new conversation.
+        conversation_id = data.get('conversation_id') or f"conv_{uuid.uuid4().hex[:16]}"
+        span.set_attribute('conversation_id', conversation_id)
         span.set_attribute('message_length', len(user_message))
 
         # Build LD context from user headers
@@ -348,10 +416,32 @@ def chat():
             while len(_tracker_cache) > MAX_TRACKER_CACHE:
                 _tracker_cache.popitem(last=False)
 
+            # Persist the exchange. Failures here shouldn't break the chat
+            # response — log and move on. Wrapped in its own span via the
+            # SQLAlchemy instrumentation.
+            try:
+                db_upsert_conversation(conversation_id, user.get('key', 'unknown'), model_name)
+                db_insert_messages(
+                    conversation_id=conversation_id,
+                    user_msg=user_message,
+                    assistant_msg=answer,
+                    generation_id=generation_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=duration_ms,
+                )
+            except Exception as db_err:
+                record_exception(db_err, {
+                    **get_common_attributes(SERVICE_NAME, '/chat'),
+                    'conversation_id': conversation_id,
+                    'stage': 'persist',
+                })
+
             return jsonify({
                 'success': True,
                 'response': answer,
                 'model': model_name,
+                'conversation_id': conversation_id,
                 'generation_id': generation_id,
                 'tokens': {
                     'input': input_tokens,
@@ -418,6 +508,17 @@ def chat_feedback():
 
         kind = FeedbackKind.Positive if sentiment == 'positive' else FeedbackKind.Negative
         tracker.track_feedback({"kind": kind})
+
+        # Persist the feedback row — decoupled from the LD AI metric path so
+        # historical sentiment analysis can run against the DB.
+        try:
+            db_insert_feedback(generation_id, sentiment)
+        except Exception as db_err:
+            record_exception(db_err, {
+                **get_common_attributes(SERVICE_NAME, '/chat/feedback'),
+                'generation_id': generation_id,
+                'stage': 'persist',
+            })
 
         record_log(
             f"Chat feedback: sentiment={sentiment}, gen_id={generation_id}",

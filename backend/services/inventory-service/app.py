@@ -37,8 +37,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, build_service_context, get_common_attributes, setup_flask_instrumentation
+from shared.db import get_engine, install_trace_attributes
 from ldclient import Context
 from shared.service_names import get_service_url
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -57,6 +59,12 @@ CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-
 
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
+
+# Postgres engine (auto-instrumented by SQLAlchemyInstrumentor so every SQL
+# statement becomes a span on the active trace).  Schema + seed data are
+# loaded by postgres/initdb/02-inventorydb.sql on container first-boot.
+engine = get_engine(default_db='inventorydb')
+install_trace_attributes(engine, SERVICE_NAME)
 
 
 # ============================================================================
@@ -344,19 +352,59 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
 
 
 # ============================================================================
-# SAMPLE DATA
+# DATA ACCESS
 # ============================================================================
 
-PRODUCTS = {
-    'prod_001': {'id': 'prod_001', 'name': 'Feature Flag Starter Kit', 'price': 29.99, 'stock': 150, 'category': 'kits'},
-    'prod_002': {'id': 'prod_002', 'name': 'Progressive Rollout Pro', 'price': 49.99, 'stock': 75, 'category': 'tools'},
-    'prod_003': {'id': 'prod_003', 'name': 'A/B Testing Suite', 'price': 79.99, 'stock': 45, 'category': 'suites'},
-    'prod_004': {'id': 'prod_004', 'name': 'Targeting Rules Package', 'price': 39.99, 'stock': 200, 'category': 'packages'},
-    'prod_005': {'id': 'prod_005', 'name': 'Segment Builder', 'price': 59.99, 'stock': 100, 'category': 'tools'},
-    'prod_006': {'id': 'prod_006', 'name': 'Experimentation Platform', 'price': 99.99, 'stock': 30, 'category': 'platforms'},
-    'prod_007': {'id': 'prod_007', 'name': 'SDK Integration Kit', 'price': 19.99, 'stock': 500, 'category': 'kits'},
-    'prod_008': {'id': 'prod_008', 'name': 'Release Automation', 'price': 149.99, 'stock': 25, 'category': 'platforms'},
-}
+def _row_to_product(row) -> dict:
+    """Shape a (products JOIN inventory) row to match the frontend's schema."""
+    return {
+        'id': row.id,
+        'name': row.name,
+        'price': (row.price_cents or 0) / 100.0,
+        'stock': row.stock or 0,
+        'category': row.category,
+    }
+
+
+def db_list_products() -> list:
+    with engine.connect() as conn:
+        result = conn.execute(text(
+            "SELECT p.id, p.name, p.price_cents, p.category, "
+            "       COALESCE(i.stock, 0) AS stock "
+            "FROM products p LEFT JOIN inventory i ON i.product_id = p.id "
+            "ORDER BY p.id"
+        ))
+        return [_row_to_product(r) for r in result.fetchall()]
+
+
+def db_get_product(product_id: str) -> Optional[dict]:
+    with engine.connect() as conn:
+        result = conn.execute(
+            text(
+                "SELECT p.id, p.name, p.price_cents, p.category, "
+                "       COALESCE(i.stock, 0) AS stock "
+                "FROM products p LEFT JOIN inventory i ON i.product_id = p.id "
+                "WHERE p.id = :pid"
+            ),
+            {'pid': product_id},
+        )
+        row = result.fetchone()
+        return _row_to_product(row) if row else None
+
+
+def db_get_stock_levels(product_ids: list) -> dict:
+    """Returns {product_id: stock} for a list of ids; missing ids → 0."""
+    if not product_ids:
+        return {}
+    with engine.connect() as conn:
+        result = conn.execute(
+            text(
+                "SELECT product_id, stock FROM inventory "
+                "WHERE product_id = ANY(:ids)"
+            ),
+            {'ids': product_ids},
+        )
+        return {row.product_id: row.stock for row in result.fetchall()}
 
 
 # ============================================================================
@@ -440,10 +488,8 @@ def list_products():
         if _err:
             raise _err
 
-        # Simulate database query
-        time.sleep(0.15)
-
-        products = list(PRODUCTS.values())
+        # Real DB read — SQLAlchemyInstrumentor produces a child SELECT span
+        products = db_list_products()
 
         record_log(f"Retrieved {len(products)} products", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, '/products'),
@@ -470,9 +516,7 @@ def get_product(product_id):
         if _err:
             raise _err
 
-        time.sleep(0.1)
-
-        product = PRODUCTS.get(product_id)
+        product = db_get_product(product_id)
 
         if not product:
             record_log(f"Product {product_id} not found", LEVELS['error'], {
@@ -506,15 +550,17 @@ def check_stock():
 
         data = request.get_json() or {}
         items = data.get('items', [])
+        product_ids = [item.get('product_id') for item in items if item.get('product_id')]
 
-        time.sleep(0.1)
+        # One query to fetch all stock levels — SQLAlchemyInstrumentor spans
+        # the SELECT so the trace shows a single DB read, not N-per-item.
+        stock_map = db_get_stock_levels(product_ids)
 
         results = []
         for item in items:
             product_id = item.get('product_id')
             quantity = item.get('quantity', 1)
-            product = PRODUCTS.get(product_id, {})
-            stock = product.get('stock', 0)
+            stock = stock_map.get(product_id, 0)
 
             results.append({
                 'product_id': product_id,
@@ -542,7 +588,9 @@ def check_stock():
 
 @app.route('/reserve', methods=['POST'])
 def reserve_stock():
-    """Reserve stock for an order."""
+    """Reserve stock for an order (transactional: insert reservations +
+    update inventory in a single BEGIN/COMMIT so the trace shows the
+    full transaction span tree)."""
     with start_span('inventory.stock.reserve') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
@@ -562,8 +610,50 @@ def reserve_stock():
         span.set_attribute('reservation_id', reservation_id)
         span.set_attribute('item_count', len(items))
 
-        # Simulate reservation process
-        time.sleep(0.2)
+        low_stock_items: list = []
+
+        # Transaction: reserve + decrement inventory atomically
+        with engine.begin() as conn:
+            for item in items:
+                product_id = item.get('product_id')
+                quantity = int(item.get('quantity', 1))
+                if not product_id:
+                    continue
+
+                # Insert the reservation
+                conn.execute(
+                    text(
+                        "INSERT INTO reservations "
+                        "  (id, order_id, product_id, quantity, status, expires_at) "
+                        "VALUES (:id, :oid, :pid, :qty, 'reserved', NOW() + INTERVAL '30 minutes')"
+                    ),
+                    {
+                        'id': f"{reservation_id}_{product_id}",
+                        'oid': order_id,
+                        'pid': product_id,
+                        'qty': quantity,
+                    },
+                )
+
+                # Decrement available stock. UPDATE...RETURNING lets us surface
+                # the new stock level in the trace without a second SELECT.
+                row = conn.execute(
+                    text(
+                        "UPDATE inventory "
+                        "SET stock = GREATEST(stock - :qty, 0), "
+                        "    reserved = reserved + :qty, "
+                        "    updated_at = NOW() "
+                        "WHERE product_id = :pid "
+                        "RETURNING stock"
+                    ),
+                    {'qty': quantity, 'pid': product_id},
+                ).fetchone()
+
+                if row and row.stock < 10:
+                    low_stock_items.append({
+                        'product_id': product_id,
+                        'current_stock': row.stock,
+                    })
 
         record_log(f"Stock reserved for order {order_id}", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, '/reserve'),
@@ -572,20 +662,17 @@ def reserve_stock():
             'items': len(items),
         })
 
-        # Notify about low stock if applicable
-        for item in items:
-            product_id = item.get('product_id')
-            product = PRODUCTS.get(product_id, {})
-            if product.get('stock', 0) < 10:
-                try:
-                    call_service('notification-service', '/send', 'POST', {
-                        'type': 'alert',
-                        'template': 'low_stock_alert',
-                        'product_id': product_id,
-                        'current_stock': product.get('stock', 0),
-                    })
-                except Exception:
-                    pass
+        # Fire-and-forget low-stock alerts (outside the DB transaction).
+        for entry in low_stock_items:
+            try:
+                call_service('notification-service', '/send', 'POST', {
+                    'type': 'alert',
+                    'template': 'low_stock_alert',
+                    'product_id': entry['product_id'],
+                    'current_stock': entry['current_stock'],
+                })
+            except Exception:
+                pass
 
         return jsonify({
             'success': True,
@@ -595,32 +682,63 @@ def reserve_stock():
                 'order_id': order_id,
                 'items': items,
                 'status': 'reserved',
-                'expires_at': '2024-12-15T10:30:00Z',
+                'expires_at': 'NOW + 30 minutes',
             }
         })
 
 
 @app.route('/release', methods=['POST'])
 def release_reservation():
-    """Release a stock reservation."""
+    """Release a stock reservation (transactional: mark released + return
+    stock to inventory in one BEGIN/COMMIT)."""
     with start_span('inventory.stock.release') as span:
         span.set_attribute('source', 'backend')
         span.set_attribute('service', SERVICE_NAME)
 
         data = request.get_json() or {}
         reservation_id = data.get('reservation_id')
+        span.set_attribute('reservation_id', reservation_id or 'unknown')
 
-        time.sleep(0.1)
+        released_items = []
+        with engine.begin() as conn:
+            # Load the reservations to know how much stock to restore.
+            rows = conn.execute(
+                text(
+                    "SELECT id, product_id, quantity FROM reservations "
+                    "WHERE id LIKE :pattern AND status = 'reserved' "
+                    "FOR UPDATE"
+                ),
+                {'pattern': f"{reservation_id}%"},
+            ).fetchall()
+
+            for row in rows:
+                conn.execute(
+                    text("UPDATE reservations SET status = 'released' WHERE id = :id"),
+                    {'id': row.id},
+                )
+                conn.execute(
+                    text(
+                        "UPDATE inventory SET "
+                        "  stock = stock + :qty, "
+                        "  reserved = GREATEST(reserved - :qty, 0), "
+                        "  updated_at = NOW() "
+                        "WHERE product_id = :pid"
+                    ),
+                    {'qty': row.quantity, 'pid': row.product_id},
+                )
+                released_items.append({'product_id': row.product_id, 'quantity': row.quantity})
 
         record_log(f"Reservation {reservation_id} released", LEVELS['info'], {
             **get_common_attributes(SERVICE_NAME, '/release'),
             'reservation_id': reservation_id,
+            'items_released': len(released_items),
         })
 
         return jsonify({
             'success': True,
             'service': SERVICE_NAME,
             'message': f'Reservation {reservation_id} released',
+            'items': released_items,
         })
 
 

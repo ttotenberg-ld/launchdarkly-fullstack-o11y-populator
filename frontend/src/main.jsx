@@ -61,7 +61,7 @@ import './index.css'
         sendEventsOnlyForVariation: false,
         plugins: [
           new Observability({
-            version: '1.0.0',
+            version: '2.0.0-db',
             tracingOrigins: true,
             networkRecording: {
               enabled: true,
