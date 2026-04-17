@@ -8,10 +8,12 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-app}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-app}
       - POSTGRES_DB=appmeta
-    # Expose for local tooling (psql, DBeaver) but not required for services —
-    # they reach postgres via the internal Docker network.
+    # Bind to loopback only — services reach postgres via the internal Docker
+    # network, and local tools (psql, DBeaver) reach it via an SSH tunnel:
+    #   ssh -L 5432:localhost:5432 <ec2-host>
+    # Never bind to 0.0.0.0 here: it would publish the DB to the internet.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
     networks:
