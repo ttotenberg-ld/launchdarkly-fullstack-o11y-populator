@@ -20,7 +20,7 @@ import string
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Playwright
 
 # Add backend directory to path for shared imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
@@ -33,6 +33,66 @@ SESSIONS_PER_MINUTE = int(os.getenv('SESSIONS_PER_MINUTE', '2'))  # Fewer sessio
 MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
 TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '60'))  # seconds
 SESSION_TIMEOUT = int(os.getenv('SESSION_TIMEOUT', '90'))  # hard cap per session
+
+# --- Browser / device diversity -------------------------------------------
+#
+# Each session picks a weighted profile so LD session replay sees a realistic
+# mix of Chrome/Safari/Edge/Firefox on desktop + iOS Safari / Android Chrome
+# on mobile. Weights are rough global-share proxies — not to be confused with
+# any specific demo audience. Tune BROWSER_PROFILES below to taste.
+#
+# NOTE: Mobile entries are *mobile-web* — Playwright's iPhone/Pixel device
+# presets render the existing React frontend at mobile viewports with touch
+# emulation. They do NOT exercise native iOS/Android SDKs. See
+# mobile-exploration.md for what native would actually require.
+
+# Realistic UAs per profile. Why override even when the Playwright default
+# would be close? Two reasons:
+#   1. Playwright's headless Chromium advertises "HeadlessChrome/..." — a
+#      dead-giveaway bot signal that trips LD's session-replay bot filter.
+#   2. Docker runs Linux, so Playwright's default UA reports Linux, which
+#      is rare for consumer web traffic. Pinning to macOS/Windows keeps the
+#      UA mix realistic.
+# Firefox and WebKit defaults don't have the HeadlessChrome tell but we
+# still override for consistency + OS realism.
+CHROME_UA = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+)
+SAFARI_UA = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 '
+    '(KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+)
+FIREFOX_UA = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) '
+    'Gecko/20100101 Firefox/121.0'
+)
+EDGE_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+)
+
+# (form_factor, engine, weight, ua_override, device_preset, label)
+# Mobile entries set ua_override=None — the Playwright device preset
+# provides an appropriate mobile UA already (iOS Safari / Android Chrome).
+BROWSER_PROFILES = [
+    ('desktop', 'chromium', 0.40, CHROME_UA,  None,        'desktop_chrome'),
+    ('desktop', 'webkit',   0.11, SAFARI_UA,  None,        'desktop_safari'),
+    ('desktop', 'chromium', 0.05, EDGE_UA,    None,        'desktop_edge'),
+    ('desktop', 'firefox',  0.04, FIREFOX_UA, None,        'desktop_firefox'),
+    ('mobile',  'webkit',   0.22, None,       'iPhone 13', 'mobile_ios_safari'),
+    ('mobile',  'chromium', 0.18, None,       'Pixel 7',   'mobile_android_chrome'),
+]
+
+# Desktop viewport rotation (weights sum to 1.0). Ignored for mobile
+# profiles — those use the Playwright device preset's own viewport.
+DESKTOP_VIEWPORTS = [
+    ({'width': 1920, 'height': 1080}, 0.35),
+    ({'width': 1440, 'height': 900},  0.25),
+    ({'width': 1366, 'height': 768},  0.20),
+    ({'width': 1280, 'height': 720},  0.10),
+    ({'width': 2560, 'height': 1440}, 0.10),
+]
 
 # Log file that records every user key that should have both a session
 # and flag evaluations.  Check this file to verify overlap in the LD dashboard.
@@ -252,10 +312,35 @@ class HumanClicker:
                     pass
 
     @staticmethod
+    def _is_mobile_viewport(page: Page) -> bool:
+        """Heuristic: mobile device presets set viewport width <= 500px.
+        Avoids the need to plumb an is_mobile flag through every call site."""
+        vp = page.viewport_size
+        if not vp:
+            return False
+        return vp.get('width', 1280) <= 500
+
+    @staticmethod
     async def simulate_mouse_movement(page: Page, steps: int = None):
         """Generate realistic mouse movements so rrweb records MouseMove
         IncrementalSnapshot events.  These are the 'timeline indicator
-        events' that LD's session pipeline checks for."""
+        events' that LD's session pipeline checks for.
+
+        On mobile viewports we skip mouse emulation entirely — rrweb on a
+        touch device shouldn't record MouseMove events, and scroll events
+        alone are sufficient for session-filter timeline signal.
+        """
+        if HumanClicker._is_mobile_viewport(page):
+            # Small scroll nudges stand in for mouse drift on mobile.
+            for _ in range(random.randint(1, 3)):
+                try:
+                    delta = random.randint(20, 80) * random.choice([1, -1])
+                    await page.evaluate(f'window.scrollBy(0, {delta})')
+                    await asyncio.sleep(random.uniform(0.15, 0.4))
+                except Exception:
+                    pass
+            return
+
         if steps is None:
             steps = random.randint(3, 6)
         viewport = page.viewport_size or {'width': 1280, 'height': 720}
@@ -272,14 +357,22 @@ class HumanClicker:
     async def interact_idle(page: Page, duration: float = 2.0):
         """Keep the page 'alive' with realistic idle interactions —
         mouse drifts and occasional scrolls — for the given duration.
-        This ensures rrweb captures enough timeline events."""
+        This ensures rrweb captures enough timeline events.
+
+        Mobile path: scroll + pause only (no mouse moves), since a touch
+        device emitting MouseMove events would look wrong in replay.
+        """
         end = asyncio.get_event_loop().time() + duration
+        is_mobile = HumanClicker._is_mobile_viewport(page)
         viewport = page.viewport_size or {'width': 1280, 'height': 720}
         while asyncio.get_event_loop().time() < end:
-            action = random.choices(
-                ['mouse', 'scroll', 'pause'],
-                weights=[0.5, 0.2, 0.3],
-            )[0]
+            if is_mobile:
+                action = random.choices(['scroll', 'pause'], weights=[0.6, 0.4])[0]
+            else:
+                action = random.choices(
+                    ['mouse', 'scroll', 'pause'],
+                    weights=[0.5, 0.2, 0.3],
+                )[0]
             try:
                 if action == 'mouse':
                     x = random.randint(50, viewport['width'] - 50)
@@ -287,7 +380,11 @@ class HumanClicker:
                     await page.mouse.move(x, y, steps=random.randint(3, 8))
                     await asyncio.sleep(random.uniform(0.2, 0.5))
                 elif action == 'scroll':
-                    delta = random.randint(50, 200) * random.choice([1, -1])
+                    # Mobile scrolls are smaller (thumb flick) vs desktop wheel.
+                    if is_mobile:
+                        delta = random.randint(30, 150) * random.choice([1, -1])
+                    else:
+                        delta = random.randint(50, 200) * random.choice([1, -1])
                     await page.evaluate(f'window.scrollBy(0, {delta})')
                     await asyncio.sleep(random.uniform(0.3, 0.7))
                 else:
@@ -1249,9 +1346,13 @@ class TrafficGenerator:
         self.session_count = 0
         self.error_count = 0
         self.success_count = 0
-        self.browser: Optional[Browser] = None
+        self.engines: Dict[str, Browser] = {}
+        self.playwright: Optional[Playwright] = None
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
         self.scenario = ComprehensiveSessionScenario(target_duration=TARGET_SESSION_DURATION)
+        # Per-profile counter — surfaces the browser mix in the stats line so
+        # you can eyeball whether weighting is landing roughly as specified.
+        self.profile_counts: Dict[str, int] = {}
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(SESSION_LOG_FILE), exist_ok=True)
@@ -1299,38 +1400,109 @@ class TrafficGenerator:
         except Exception as e:
             print(f"  [log error] event log: {e}")
     
-    async def run_session(self, context: BrowserContext) -> Dict[str, Any]:
-        """Run a single browser session with a hard timeout guard."""
+    def _pick_profile(self) -> tuple:
+        """Weighted pick from BROWSER_PROFILES."""
+        return random.choices(
+            BROWSER_PROFILES,
+            weights=[p[2] for p in BROWSER_PROFILES],
+        )[0]
+
+    async def _new_context_for_profile(self, profile: tuple) -> BrowserContext:
+        """Build a fresh BrowserContext for the given profile.
+
+        Desktop: rotating viewport + optional UA override (Edge spoof).
+        Mobile:  Playwright device preset (sets viewport, UA, deviceScaleFactor,
+                 isMobile, hasTouch — everything needed for a mobile session).
+        """
+        _form_factor, engine_name, _w, ua_override, device_preset, _label = profile
+        browser = self.engines[engine_name]
+
+        if device_preset:
+            device_kwargs = dict(self.playwright.devices[device_preset])
+            device_kwargs['locale'] = 'en-US'
+            context = await browser.new_context(**device_kwargs)
+        else:
+            viewport = random.choices(
+                [v[0] for v in DESKTOP_VIEWPORTS],
+                weights=[v[1] for v in DESKTOP_VIEWPORTS],
+            )[0]
+            kwargs = {'viewport': viewport, 'locale': 'en-US'}
+            if ua_override:
+                kwargs['user_agent'] = ua_override
+            context = await browser.new_context(**kwargs)
+
+        context.set_default_timeout(10000)            # selectors, clicks
+        context.set_default_navigation_timeout(15000) # goto / load states
+        return context
+
+    def _stealth_script(self, engine_name: str) -> str:
+        """Engine-specific navigator-property spoofing.
+
+        Universal: webdriver=false, languages=['en-US','en'].
+        Chromium-only: window.chrome shim (Firefox/WebKit must NOT have this,
+        or its presence contradicts the UA and trips bot detectors).
+
+        Note: `navigator.platform` is intentionally NOT overridden — Playwright
+        sets it to match the UA/device automatically, and a wrong platform
+        vs UA is a classic bot signal.
+        """
+        base = """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => false, configurable: true,
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en'], configurable: true,
+            });
+        """
+        if engine_name == 'chromium':
+            base += """
+                if (!window.chrome) { window.chrome = {}; }
+                if (!window.chrome.runtime) {
+                    window.chrome.runtime = { id: undefined };
+                }
+            """
+        return base
+
+    async def run_session(self) -> Dict[str, Any]:
+        """Run a single browser session with a hard timeout guard.
+
+        Picks a weighted browser/device profile, creates a throwaway context
+        for this session only, then tears it down. Engines themselves are
+        long-lived in self.engines; we only pay per-session cost for the
+        context + page.
+        """
         async with self.semaphore:
             self.session_count += 1
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
             user = self.select_user()
             start_time = datetime.now()
 
-            print(f"[{datetime.now().isoformat()}] Session {session_id} starting: {user['email']}")
+            profile = self._pick_profile()
+            profile_label = profile[5]
+            engine_name = profile[1]
+            self.profile_counts[profile_label] = self.profile_counts.get(profile_label, 0) + 1
 
+            print(f"[{datetime.now().isoformat()}] Session {session_id} starting: "
+                  f"{user['email']} [{profile_label}]")
+
+            context = await self._new_context_for_profile(profile)
             page = await context.new_page()
 
-            # --- Stealth: mask Playwright automation signals ---
-            await page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false, configurable: true,
-                });
-                Object.defineProperty(navigator, 'platform', {
-                    get: () => 'MacIntel', configurable: true,
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'], configurable: true,
-                });
-                if (!window.chrome) { window.chrome = {}; }
-                if (!window.chrome.runtime) {
-                    window.chrome.runtime = { id: undefined };
-                }
-            """)
+            # --- Stealth: engine-specific automation masking ---
+            await page.add_init_script(self._stealth_script(engine_name))
 
             # Inject user identity
             user_json = json.dumps(user)
             await page.add_init_script(f"window.__LD_USER__ = {user_json};")
+
+            # Inject browser profile label (e.g. 'mobile_ios_safari') so the
+            # frontend can fold it into the INITIAL LD context. Must happen
+            # via add_init_script (runs before any page JS) so main.jsx sees
+            # it before asyncWithLDProvider fires — otherwise we'd need a
+            # post-init identify() call and a second flag evaluation.
+            await page.add_init_script(
+                f"window.__BROWSER_PROFILE__ = {json.dumps(profile_label)};"
+            )
 
             # --- Monitor LD event traffic ---
             events_seen = {"bulk": 0, "feature": 0, "summary": 0, "identify": 0, "custom": 0}
@@ -1367,6 +1539,8 @@ class TrafficGenerator:
             try:
                 r = await self.scenario.execute(page, user)
                 r['session_id'] = session_id
+                r['browser_profile'] = profile_label
+                r['engine'] = engine_name
                 # Flush events before close
                 try:
                     await page.evaluate("""async () => {
@@ -1385,6 +1559,11 @@ class TrafficGenerator:
                     await page.close()
                 except Exception:
                     pass
+                # Per-session contexts are throwaway — close to free memory.
+                try:
+                    await context.close()
+                except Exception:
+                    pass
 
             elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1392,6 +1571,8 @@ class TrafficGenerator:
                 return {
                     'session_id': session_id, 'scenario': 'comprehensive_session',
                     'user': user, 'error': 'unknown',
+                    'browser_profile': profile_label,
+                    'engine': engine_name,
                     'timestamp': datetime.now().isoformat(),
                 }
 
@@ -1409,7 +1590,8 @@ class TrafficGenerator:
             duration = result.get('session_duration_seconds', 0)
             print(f"[{datetime.now().isoformat()}] Session {session_id} completed: "
                   f"{duration:.1f}s, {len(endpoints)} endpoints, "
-                  f"{len(result.get('actions', []))} actions")
+                  f"{len(result.get('actions', []))} actions "
+                  f"[{profile_label}]")
             return result
     
     async def run_forever(self):
@@ -1429,6 +1611,12 @@ class TrafficGenerator:
         print(f"  Expected concurrent sessions: ~{expected_concurrent:.1f}")
         print(f"  Max concurrent browsers: {MAX_CONCURRENT_BROWSERS}")
         print(f"{'='*70}")
+        print(f"  Browser / device mix (weighted):")
+        for p_ in BROWSER_PROFILES:
+            print(f"    - {p_[5]:<26} {p_[2] * 100:>5.1f}%  ({p_[1]}"
+                  f"{', ' + p_[4] if p_[4] else ''}"
+                  f"{', UA override' if p_[3] else ''})")
+        print(f"{'='*70}")
         print(f"  Human-like behaviors enabled:")
         print(f"    - Typing with variable speed (30-60 WPM)")
         print(f"    - Typos and corrections")
@@ -1436,62 +1624,57 @@ class TrafficGenerator:
         print(f"    - Random scrolling and hovering")
         print(f"    - Full endpoint coverage per session")
         print(f"{'='*70}\n")
-        
-        async with async_playwright() as p:
-            # Launch browser with stealth flags to avoid bot detection.
-            # LD's session replay pipeline (via Highlight) filters sessions
-            # from automated browsers, so we mask automation signals.
-            self.browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                ],
-            )
 
-            # Create a persistent context for better session handling.
-            # Set aggressive default timeouts so individual Playwright
-            # operations fail fast instead of hanging the whole session.
-            context = await self.browser.new_context(
-                viewport={'width': 1280, 'height': 720},
-                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                locale='en-US',
+        async with async_playwright() as p:
+            # Launch all three engines once; reuse across sessions. Edge
+            # reuses the chromium engine with a UA override per-context.
+            # LD's session replay pipeline (via Highlight) filters sessions
+            # from automated browsers, so we mask automation signals via
+            # per-engine stealth init scripts in run_session.
+            self.playwright = p
+            self.engines['chromium'] = await p.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled'],
             )
-            context.set_default_timeout(10000)           # 10s for selectors, clicks, etc.
-            context.set_default_navigation_timeout(15000) # 15s for goto / load states
-            
+            self.engines['firefox'] = await p.firefox.launch(headless=True)
+            self.engines['webkit'] = await p.webkit.launch(headless=True)
+            print(f"  ✓ Launched engines: chromium, firefox, webkit\n")
+
             # Track running session tasks
             running_tasks: set = set()
-            
+
             async def session_wrapper():
                 """Wrapper to run session and print stats."""
                 task = asyncio.current_task()
                 running_tasks.add(task)
                 try:
-                    await self.run_session(context)
-                    
+                    await self.run_session()
+
                     # Print stats every 5 sessions
                     if self.session_count % 5 == 0:
                         error_rate = (self.error_count / self.session_count * 100) if self.session_count > 0 else 0
+                        mix = ', '.join(f"{k}={v}" for k, v in sorted(self.profile_counts.items()))
                         print(f"\n{'='*50}")
                         print(f"[Stats] Sessions: {self.session_count}, "
                               f"Success: {self.success_count}, "
                               f"Errors: {self.error_count} ({error_rate:.1f}%), "
                               f"Active: {len(running_tasks)}")
+                        print(f"[Mix]   {mix}")
                         print(f"{'='*50}\n")
                 except Exception as e:
                     print(f"Error in session: {e}")
                 finally:
                     running_tasks.discard(task)
-            
+
             try:
                 while True:
                     try:
                         # Spawn session without waiting for it to complete
                         asyncio.create_task(session_wrapper())
-                        
+
                         # Wait before starting next session
                         await asyncio.sleep(interval)
-                        
+
                     except KeyboardInterrupt:
                         print("\n\nShutting down traffic generator...")
                         break
@@ -1503,8 +1686,12 @@ class TrafficGenerator:
                 if running_tasks:
                     print(f"Waiting for {len(running_tasks)} active sessions to complete...")
                     await asyncio.gather(*running_tasks, return_exceptions=True)
-                await context.close()
-                await self.browser.close()
+                # Close engines in a predictable order.
+                for name, browser in self.engines.items():
+                    try:
+                        await browser.close()
+                    except Exception as e:
+                        print(f"Error closing {name}: {e}")
     
     def run(self):
         """Start the traffic generator."""

@@ -20,6 +20,18 @@ import './index.css'
     const ldUser = typeof window !== 'undefined' ? window.__LD_USER__ : null;
     const userKey = ldUser?.key || Math.random().toString(36).substr(2, 9);
 
+    // Browser profile injected by the simulator (e.g. 'mobile_ios_safari',
+    // 'desktop_firefox'). Undefined for real human traffic; that's fine —
+    // the attribute just won't exist on those contexts and LD targeting
+    // clauses that reference it simply won't match. formFactor is a
+    // coarser split for the common "mobile vs desktop" targeting case.
+    const browserProfile = typeof window !== 'undefined' ? window.__BROWSER_PROFILE__ : null;
+    const formFactor = browserProfile?.startsWith('mobile_')
+      ? 'mobile'
+      : browserProfile?.startsWith('desktop_')
+        ? 'desktop'
+        : null;
+
     // Fetch the session replay privacy flag BEFORE SDK init, because
     // SessionReplay's privacySetting can only be set in the constructor.
     // Uses LD's client-side eval endpoint (no SDK needed).
@@ -56,12 +68,19 @@ import './index.css'
           metro: ldUser.metro,
           country: ldUser.country,
         }),
+        // Simulator-only: fold browser profile into the INITIAL context
+        // so the first flag evaluation already carries it — avoids the
+        // extra round-trip a post-init identify() would cost.
+        ...(browserProfile && { browserProfile, formFactor }),
       },
       options: {
         sendEventsOnlyForVariation: false,
         plugins: [
           new Observability({
-            version: '2.0.0-db',
+            // Baked in at build time from VITE_SERVICE_VERSION (see .env /
+            // docker-compose.yml). Falls back to 'dev' for local `vite dev`
+            // runs without docker-compose.
+            version: import.meta.env.VITE_SERVICE_VERSION || 'dev',
             tracingOrigins: true,
             networkRecording: {
               enabled: true,

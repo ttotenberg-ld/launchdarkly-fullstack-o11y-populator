@@ -1,5 +1,8 @@
-# Use Playwright's official Python image with browsers pre-installed
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+# Use Playwright's official Python image with browsers pre-installed.
+# The image tag MUST match the `playwright` pip package version in
+# simulator/requirements.txt — mismatches surface as missing system libs
+# (e.g. libgtk-4-1 for WebKit), which crash-loops the container.
+FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
 
 WORKDIR /app
 
@@ -13,8 +16,10 @@ COPY simulator/requirements.txt /app/
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium only for smaller image)
-RUN playwright install chromium
+# Install Playwright browsers. Three engines (~+400 MB vs chromium-only)
+# to diversify the session replay gallery — Chrome/Edge ride the chromium
+# engine (Edge via UA spoof), Safari/iOS ride webkit, Firefox rides firefox.
+RUN playwright install chromium firefox webkit
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1

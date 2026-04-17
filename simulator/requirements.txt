@@ -1,4 +1,6 @@
-playwright>=1.40.0
+# Keep this pinned to match the base image tag in simulator/Dockerfile.
+# Version skew between the pip package and the image crashes webkit at launch.
+playwright==1.58.0
 python-dotenv>=1.0.0
 launchdarkly-server-sdk>=9.12.0
 launchdarkly-observability>=0.1.0
