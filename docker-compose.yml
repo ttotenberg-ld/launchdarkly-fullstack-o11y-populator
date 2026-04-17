@@ -39,7 +39,7 @@ services:
     environment:
       - LD_SDK_KEY=${LD_SDK_KEY}
       - SERVICE_NAME=api-gateway
-      - SERVICE_VERSION=${SERVICE_VERSION:-2.0.2}
+      - SERVICE_VERSION=${SERVICE_VERSION:-2.0.3}
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - FLASK_PORT=5000
       - USE_DOCKER=true
