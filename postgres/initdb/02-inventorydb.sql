@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS inventory (
     product_id   VARCHAR(32) PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
     stock        INTEGER NOT NULL DEFAULT 0,
     reserved     INTEGER NOT NULL DEFAULT 0,
+    -- seed_stock is the "restock to" baseline read by the retention reaper.
+    -- When stock drifts to 0 from sustained simulator reservations, the reaper
+    -- resets stock back to this value so the demo never permanently runs out.
+    seed_stock   INTEGER NOT NULL DEFAULT 0,
     updated_at   TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -46,13 +50,13 @@ INSERT INTO products (id, name, price_cents, category, description, tags) VALUES
     ('prod_008', 'Release Automation',          14999, 'platforms', 'Automate the full release lifecycle.',                       ARRAY['release','automation','cicd'])
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO inventory (product_id, stock) VALUES
-    ('prod_001', 150),
-    ('prod_002', 75),
-    ('prod_003', 45),
-    ('prod_004', 200),
-    ('prod_005', 100),
-    ('prod_006', 30),
-    ('prod_007', 500),
-    ('prod_008', 25)
+INSERT INTO inventory (product_id, stock, seed_stock) VALUES
+    ('prod_001', 150, 150),
+    ('prod_002',  75,  75),
+    ('prod_003',  45,  45),
+    ('prod_004', 200, 200),
+    ('prod_005', 100, 100),
+    ('prod_006',  30,  30),
+    ('prod_007', 500, 500),
+    ('prod_008',  25,  25)
 ON CONFLICT (product_id) DO NOTHING;

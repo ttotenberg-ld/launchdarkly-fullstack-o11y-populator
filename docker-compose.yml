@@ -205,7 +205,8 @@ services:
       - ld-observability
     restart: unless-stopped
 
-  # Analytics Service (leaf service - no dependencies)
+  # Analytics Service — also hosts the retention reaper background job
+  # (sweeps old rows, restocks inventory, once every 5 min).
   analytics-service:
     build:
       context: ./backend
@@ -219,6 +220,19 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - FLASK_PORT=5007
       - USE_DOCKER=true
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_USER=${POSTGRES_USER:-app}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-app}
+      # Reaper opens engines per-DB dynamically; this default is just a fallback.
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/paymentdb
+      # Retention tuning — 7 days for audit tables, 2 hours for short-lived reservations.
+      - RETENTION_SECONDS=${RETENTION_SECONDS:-604800}
+      - RETENTION_SECONDS_RESERVATIONS=${RETENTION_SECONDS_RESERVATIONS:-7200}
+      - RETENTION_SWEEP_INTERVAL_MINUTES=${RETENTION_SWEEP_INTERVAL_MINUTES:-5}
+      - RETENTION_ENABLED=${RETENTION_ENABLED:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - ld-observability
     restart: unless-stopped

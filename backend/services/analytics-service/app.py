@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
+from shared.reaper import run_retention_sweep
 
 
 # Load environment variables
@@ -35,6 +36,30 @@ CORS(app, expose_headers=['traceparent', 'tracestate'], allow_headers=['Content-
 
 # Set up instrumentation AFTER LD client is initialized
 setup_flask_instrumentation(app)
+
+# Retention reaper — runs every RETENTION_SWEEP_INTERVAL_MINUTES (default 5).
+# Bounded to single-process via a Postgres advisory lock inside run_retention_sweep,
+# so this is safe even if analytics-service is horizontally scaled.
+RETENTION_SWEEP_INTERVAL_MINUTES = int(os.getenv('RETENTION_SWEEP_INTERVAL_MINUTES', '5'))
+RETENTION_ENABLED = os.getenv('RETENTION_ENABLED', 'true').lower() in ('true', '1', 'yes')
+
+if RETENTION_ENABLED:
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    _scheduler = BackgroundScheduler(daemon=True, timezone='UTC')
+    _scheduler.add_job(
+        run_retention_sweep,
+        'interval',
+        minutes=RETENTION_SWEEP_INTERVAL_MINUTES,
+        id='retention_sweep',
+        next_run_time=None,  # first run fires one interval after startup
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.start()
+    print(f"  ✓ Retention reaper scheduled every {RETENTION_SWEEP_INTERVAL_MINUTES}m")
+else:
+    print("  ⚠ Retention reaper disabled (RETENTION_ENABLED=false)")
 
 
 # Global error handler
