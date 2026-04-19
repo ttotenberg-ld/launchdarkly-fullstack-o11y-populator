@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+# Unbuffered stdout/stderr so `docker compose logs` shows Flask/LD output
+# in real time instead of waiting for the buffer to fill.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # Copy shared modules first
