@@ -5,16 +5,12 @@ import { CartProvider } from './context/CartContext';
 import { AuthProvider } from './context/AuthContext';
 import Router from './Router';
 
-// All flag keys in the tt-qr-demo project.
+// All client-side flag keys this app reads. Must exist in the configured
+// LD project (see terraform/ or provision by hand).
 // Explicit variation() calls generate individual "feature" events
 // (when trackEvents is enabled on the flag), which link flag evaluations
 // to sessions in the LD dashboard.
 const FLAG_KEYS = [
-  { key: 'releaseNewUI',          defaultValue: false },
-  { key: 'showChatbot',           defaultValue: false },
-  { key: 'showNewFooter',         defaultValue: false },
-  { key: 'showNewFeatures',       defaultValue: false },
-  { key: 'showNewHero',           defaultValue: false },
   { key: 'migrate-warehouse-api', defaultValue: 'v1' },
   { key: 'product-card-layout',   defaultValue: 'standard' },
   { key: 'promo-banner',          defaultValue: 'none' },

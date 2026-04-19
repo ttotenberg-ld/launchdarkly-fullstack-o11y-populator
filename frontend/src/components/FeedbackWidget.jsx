@@ -14,9 +14,6 @@ import { LDRecord } from '@launchdarkly/session-replay';
  */
 
 const FLAG_KEYS_FOR_FEEDBACK = [
-  'releaseNewUI',
-  'showNewHero',
-  'showNewFeatures',
   'migrate-warehouse-api',
 ];
 

@@ -8,6 +8,7 @@ import time
 import uuid
 import random
 import requests
+from typing import Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -24,9 +25,15 @@ from ldobserve.observe import (
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from shared.observability import create_ld_client, get_common_attributes, setup_flask_instrumentation
+from shared.observability import (
+    create_ld_client,
+    build_service_context,
+    get_common_attributes,
+    setup_flask_instrumentation,
+)
 from shared.db import get_engine, install_trace_attributes
 from shared.users import get_random_user
+from ldclient import Context
 
 from shared.service_names import get_service_url
 from sqlalchemy import text
@@ -95,6 +102,61 @@ def call_service(service_name: str, path: str, method: str = 'GET', data: dict =
         raise
 
 
+# ============================================================================
+# FLAG: payment-processor-migration (evaluated on every /checkout attempt)
+# ============================================================================
+# The flag's *behavior* is driven by payment-service (/process reads it to
+# decide which pathologies to inject). But /process is only reached at the
+# end of a successful checkout UI flow, so payment-side evaluations are
+# sparse — not enough volume for guarded rollouts to accumulate user-kind
+# context samples.
+#
+# Evaluating it here too (order-service /checkout, BEFORE the inventory
+# reservation that can fail) guarantees one evaluation per checkout attempt
+# with the full user context attached. The returned value is logged and
+# recorded on the span, but NOT used to drive behavior — payment-service
+# remains the authoritative evaluation site for routing pathology logic.
+FLAG_KEY_PAYMENT_PROCESSOR = "payment-processor-migration"
+
+
+def _build_user_context() -> Optional[Context]:
+    """Extract user context from X-User-* headers; None on health checks."""
+    user_key = request.headers.get('X-User-Key')
+    if not user_key:
+        return None
+    builder = Context.builder(user_key).kind("user")
+    name = request.headers.get('X-User-Name')
+    if name:
+        builder.name(name)
+    for header, attr in [
+        ('X-User-Email', 'email'),
+        ('X-User-Plan', 'plan'),
+        ('X-User-Role', 'role'),
+        ('X-User-Metro', 'metro'),
+        ('X-User-Country', 'country'),
+    ]:
+        value = request.headers.get(header)
+        if value:
+            builder.set(attr, value)
+    return builder.build()
+
+
+def build_evaluation_context() -> Context:
+    """Multi-context: user (if present) + request (ephemeral) + service (stable)."""
+    user_context = _build_user_context()
+    request_context = Context.builder(str(uuid.uuid4())) \
+        .kind("request") \
+        .set("timestamp", time.time()) \
+        .set("endpoint", request.path) \
+        .set("method", request.method) \
+        .set("anonymous", True) \
+        .build()
+    service_context = build_service_context(SERVICE_NAME)
+    if user_context:
+        return Context.create_multi(user_context, request_context, service_context)
+    return Context.create_multi(request_context, service_context)
+
+
 # Global error handler
 @app.errorhandler(Exception)
 def handle_exception(error):
@@ -155,6 +217,32 @@ def checkout():
         span.set_attribute('total', total)
         span.set_attribute('layout_variant', layout_variant)
         span.set_attribute('promo_variant', promo_variant)
+
+        # Evaluate payment-processor-migration up front so every checkout
+        # attempt contributes a user-kind evaluation event — not just the
+        # ones that survive inventory reservation and reach /process. This
+        # is what gives guarded rollouts on this flag enough sample volume
+        # to progress. Behavior is still driven by payment-service; here we
+        # only log + tag the span so the intended variation is attributable
+        # even on failed checkouts.
+        eval_context = build_evaluation_context()
+        processor_detail = client.variation_detail(
+            FLAG_KEY_PAYMENT_PROCESSOR, eval_context, "v1",
+        )
+        processor_version = processor_detail.value if processor_detail.value in ("v1", "v2", "v3") else "v1"
+        span.set_attribute('payment_processor_version', processor_version)
+        record_log(
+            f"Flag '{FLAG_KEY_PAYMENT_PROCESSOR}' evaluated to {processor_version}",
+            LEVELS['info'],
+            {
+                **get_common_attributes(SERVICE_NAME, '/checkout'),
+                'flag.key': FLAG_KEY_PAYMENT_PROCESSOR,
+                'flag.value': processor_version,
+                'flag.variation_index': processor_detail.variation_index,
+                'flag.reason.kind': (processor_detail.reason or {}).get('kind', 'unknown'),
+                'order_id': order_id,
+            },
+        )
 
         # Persist the pending order BEFORE downstream calls, so even failed
         # checkouts produce an auditable row (and a BEGIN/INSERT/COMMIT

@@ -49,6 +49,15 @@ dist-ssr/
 *.log
 logs/
 
+# Terraform — local state + per-machine values (contain secrets: LD access tokens)
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+terraform/*.tfvars.json
+!terraform/*.tfvars.example
+
 
 browser-exploration.md
 mobile-exploration.md

@@ -114,9 +114,6 @@ SEARCH_QUERIES = [
 
 # Flag keys the feedback widget can target
 FEEDBACK_FLAG_KEYS = [
-    'releaseNewUI',
-    'showNewHero',
-    'showNewFeatures',
     'migrate-warehouse-api',
 ]
 

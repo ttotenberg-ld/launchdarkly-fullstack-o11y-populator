@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — terraform.tfvars.example is committed.
+#
+# Alternative: set these as TF_VAR_* environment variables and skip the file.
+
+# Your LaunchDarkly project key. The project must already exist — Terraform
+# creates flags within projects, not projects themselves.
+project_key = "your-project-key"
+
+# API access token with write access to flags + AI Configs on the project above.
+# Create at Account settings → Authorization → Access tokens.
+launchdarkly_access_token = "api-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Optional: override if your project's environment keys differ from the defaults.
+# environment_keys = ["staging", "test", "production"]
