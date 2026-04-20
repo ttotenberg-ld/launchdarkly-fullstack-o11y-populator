@@ -543,9 +543,12 @@ class ComprehensiveSessionScenario:
         """Browse the products page."""
         # Navigate to products (try clicking first, then direct navigation)
         try:
-            shop_btn = page.locator('[data-testid="shop-now-button"], a[href*="products"]')
+            # Use only the data-testid: the `a[href*="products"]` fallback
+            # also matches the footer "Products" link, which trips Playwright's
+            # strict-mode locator (>1 match) and silently kills browse phase.
+            shop_btn = page.locator('[data-testid="shop-now-button"]')
             if await shop_btn.count() > 0:
-                await HumanClicker.click_with_hesitation(page, '[data-testid="shop-now-button"], a[href*="products"]')
+                await HumanClicker.click_with_hesitation(page, '[data-testid="shop-now-button"]')
                 await page.wait_for_load_state('domcontentloaded', timeout=10000)
             else:
                 await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
@@ -885,9 +888,14 @@ class ComprehensiveSessionScenario:
         
         # Go to cart
         try:
-            cart_icon = page.locator('[data-testid="cart-icon"], a[href*="cart"]')
+            # Use only the data-testid: the `a[href*="cart"]` fallback also
+            # matches the footer "Cart" link, so Playwright's strict mode
+            # raises (>1 match) and the entire checkout phase aborts before
+            # /cart loads — which is why /api/checkout was getting zero
+            # traffic and payment-processor-migration was getting zero evals.
+            cart_icon = page.locator('[data-testid="cart-icon"]')
             if await cart_icon.count() > 0:
-                await HumanClicker.click_with_hesitation(page, '[data-testid="cart-icon"], a[href*="cart"]')
+                await HumanClicker.click_with_hesitation(page, '[data-testid="cart-icon"]')
             else:
                 await page.goto(f"{FRONTEND_URL}/cart", wait_until='domcontentloaded')
             
@@ -1577,7 +1585,8 @@ class TrafficGenerator:
             if events_seen["bulk"] > 0:
                 print(f"  [{session_id}] LD events: {events_seen}")
 
-            failed = any(not a.get('success', True) for a in result.get('actions', []))
+            failed_actions = [a for a in result.get('actions', []) if not a.get('success', True)]
+            failed = bool(failed_actions)
             if failed:
                 self.error_count += 1
             else:
@@ -1589,6 +1598,13 @@ class TrafficGenerator:
                   f"{duration:.1f}s, {len(endpoints)} endpoints, "
                   f"{len(result.get('actions', []))} actions "
                   f"[{profile_label}]")
+            # Dump failed actions for diagnosis. Each line shows phase, action,
+            # and the first 200 chars of the error message so selector/timing
+            # failures stand apart from intentional warehouse-api flag errors.
+            for fa in failed_actions:
+                err = (fa.get('error') or '')[:200].replace('\n', ' ')
+                print(f"  [{session_id}] FAIL phase={fa.get('phase')} "
+                      f"action={fa.get('action')} err={err}")
             return result
     
     async def run_forever(self):
