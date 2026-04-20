@@ -96,9 +96,9 @@ Every funnel metric carries `layout_variant` (and, where applicable, `promo_vari
 
 | Variant | Composite Error Rate | Scenarios |
 |---|---|---|
-| **v1** (legacy) | ~1% baseline | Background errors only |
+| **v1** (legacy) | 0% | `WAREHOUSE_V1_ERRORS` list is empty by design — v1 is a clean legacy baseline. |
 | **v2** (unstable) | **~93%** | Timeout 504 (28%, 3-8s latency) · ResponseParse 500 (24%) · RateLimit 429 (18%) · StaleCache 500 (14%) · Auth 503 (9%) |
-| **v3** (stable) | 0% | Clean |
+| **v3** (stable) | 0% | Clean (stabilized) |
 
 Each injected error:
 1. Increments `app.inventory.warehouse_error_total` with `error_type` + `warehouse_api_version`

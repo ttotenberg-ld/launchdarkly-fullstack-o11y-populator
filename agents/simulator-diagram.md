@@ -561,14 +561,9 @@ The `inventory-service` injects errors based on the `migrate-warehouse-api` flag
 ```mermaid
 flowchart LR
     subgraph Flag["migrate-warehouse-api flag"]
-        V1["v1 (stable)<br/>~4% error rate"]
+        V1["v1 (legacy)<br/>0% — clean baseline"]
         V2["v2 (migration)<br/>~93% error rate"]
-        V3["v3 (complete)<br/>0% errors"]
-    end
-
-    subgraph V1Errors["v1 Error Scenarios"]
-        V1E1["ConnectionPoolError (2%)<br/>503, 2-5s latency"]
-        V1E2["QueryTimeoutError (2%)<br/>504, 4-8s latency"]
+        V3["v3 (stabilized)<br/>0% errors"]
     end
 
     subgraph V2Errors["v2 Error Scenarios"]
@@ -579,7 +574,6 @@ flowchart LR
         V2E5["StaleCacheError (14%)"]
     end
 
-    V1 --> V1Errors
     V2 --> V2Errors
 
     subgraph FeedbackImpact["Impact on Feedback"]

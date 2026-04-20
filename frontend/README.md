@@ -1,385 +1,111 @@
-# LaunchDarkly Python Observability - Frontend
+# Frontend
 
-React frontend for the LaunchDarkly Python observability demo. This application provides an interactive interface to trigger observability events on the Python backend.
+React + Vite storefront that drives the demo. Renders the UI real users and the Playwright simulator interact with — and emits client-side LaunchDarkly flag evaluations, Observability telemetry, and Session Replay. For cross-repo context (flags, contexts, signal inventory) read [`../AGENTS.md`](../AGENTS.md).
 
-## Overview
+## Stack
 
-The frontend demonstrates distributed tracing by making HTTP requests to the Python Flask backend. Each button click triggers a backend API call that generates observability data (errors, logs, or traces) which is then sent to LaunchDarkly.
+- **React 18** + **Vite 6** (ES modules, `@vitejs/plugin-react`)
+- **React Router v6** for page routing
+- **LaunchDarkly client SDK** (`launchdarkly-js-client-sdk` + `launchdarkly-react-client-sdk`)
+- **LD Observability plugin** (`@launchdarkly/observability`) + **LD Session Replay** (`@launchdarkly/session-replay`)
+- **Nginx** serving the `vite build` output in production (container port 80 → host 3000)
 
-## Features
-
-- **Error Demo**: Trigger different types of errors on the backend
-- **Logs Demo**: Generate logs at various severity levels
-- **Traces Demo**: Create distributed traces from frontend to backend
-- **Real-time Feedback**: See immediate results from backend API calls
-- **LaunchDarkly Integration**: Client-side SDK for frontend observability (optional)
-
-## Prerequisites
-
-- Node.js 16+ and npm
-- Backend server running on http://localhost:5000
-- LaunchDarkly client-side ID
-
-## Installation
-
-### 1. Install Dependencies
-
-```bash
-npm install
-```
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```bash
-# LaunchDarkly Client-Side ID (not secret, safe for frontend)
-# Get from: LaunchDarkly Dashboard > Project Settings > Environments > Client-side ID
-VITE_LD_CLIENT_SIDE_ID=your-client-side-id
-
-# Backend API URL
-VITE_API_URL=http://localhost:5000
-```
-
-## Running the Application
-
-### Development Mode
-
-```bash
-npm run dev
-```
-
-Application will start on http://localhost:5173 (or next available port).
-
-### Build for Production
-
-```bash
-npm run build
-```
-
-### Preview Production Build
-
-```bash
-npm run preview
-```
-
-## Project Structure
+## Layout
 
 ```
 frontend/
 ├── src/
+│   ├── main.jsx               # LD SDK init + Observability + SessionReplay plugins
+│   ├── App.jsx                # root, evaluates migrate-warehouse-api on mount (for feature events)
+│   ├── Router.jsx             # route table
+│   ├── context/CartContext.jsx# cart state, persisted in localStorage (`ld-store-cart`)
+│   ├── services/api.js        # single fetch wrapper; sends X-User-* headers on every call
+│   ├── pages/                 # Home, Products, ProductDetail, Cart, Checkout, Account, …
 │   ├── components/
-│   │   ├── DashboardLayout.jsx    # Main layout container
-│   │   ├── ErrorBoundary.jsx      # Error boundary wrapper
-│   │   ├── ErrorDemo.jsx          # Error tracking UI
-│   │   ├── LogsDemo.jsx           # Logging UI
-│   │   ├── TracesDemo.jsx         # Distributed tracing UI
-│   │   └── FancyWidget.jsx        # Feature flag demo
-│   ├── App.jsx                    # Root component
-│   ├── main.jsx                   # Entry point with LD initialization
-│   └── index.css                  # Global styles
-├── public/                        # Static assets
-├── index.html                     # HTML template
-├── vite.config.js                 # Vite configuration
-├── package.json                   # Dependencies
-└── .env                           # Environment config (gitignored)
+│   │   ├── layout/            # Navbar, Footer, PromoBanner (promo-banner flag)
+│   │   ├── products/          # ProductCard (product-card-layout flag)
+│   │   ├── cart/              # CartItem, CartSummary
+│   │   ├── checkout/          # ShippingForm, PaymentForm, OrderSummary
+│   │   ├── ChatWidget.jsx     # talks to chat-service (LD AI Config)
+│   │   └── FeedbackWidget.jsx # posts feedback with o11y_session_id → Session Replay jump
+│   └── utils/                 # telemetry helpers, error-injection sandbox
+├── public/
+├── Dockerfile                 # two-stage Node build → Nginx runtime
+├── nginx.conf
+├── vite.config.js
+├── package.json
+└── .env.example
 ```
 
-## Component Overview
+## LD SDK boot sequence
 
-### ErrorDemo.jsx
+Read `src/main.jsx` top to bottom — the ordering matters and the comments explain why.
 
-Triggers error endpoints on the Python backend:
+Summary:
 
-- **Manual Error**: Calls `/api/errors/manual`
-- **Async Error**: Calls `/api/errors/async` (with 1s delay)
-- **Uncaught Error**: Calls `/api/errors/uncaught`
+1. **Session-replay privacy is fetched via the client-side eval REST endpoint, BEFORE SDK init.** `SessionReplay`'s `privacySetting` is constructor-only — flipping the `session-replay-privacy` flag mid-session has no effect. The privacy level takes effect on the next page load.
+2. **Initial user context is assembled from `window.__LD_USER__`** if the simulator injected one, otherwise a random key. The simulator also sets `window.__BROWSER_PROFILE__` so the initial evaluation already carries browser profile + form factor.
+3. **`asyncWithLDProvider` resolves when streaming flag data arrives.** The app renders nothing until then — this is fine for the demo and avoids flash-of-default-variation.
+4. Observability plugin is configured with `tracingOrigins: true` + `recordHeadersAndBody: true` — full network detail in the LD dashboard.
+5. `version` on the Observability plugin is baked at **build time** from `VITE_SERVICE_VERSION` (see the Dockerfile `ARG`), falling back to `'dev'` for `vite dev`.
 
-All errors are recorded on the backend and sent to LaunchDarkly.
+## Client-side flag evaluations
 
-### LogsDemo.jsx
+Via `useFlags()` from `launchdarkly-react-client-sdk`. The React SDK emits a `feature` event the first time a flag is read in render, which is why `App.jsx` evaluates `migrate-warehouse-api` on mount even though the client doesn't *use* its value (the server is authoritative) — reading it registers a client-side evaluation for dashboards.
 
-Triggers logging endpoints on the Python backend:
+| Flag | Used in | Effect |
+|---|---|---|
+| `product-card-layout` | `pages/Products.jsx:15`, `pages/Checkout.jsx:20`, `components/products/ProductCard.jsx:20` | `standard` / `minimal` / `detailed` — ProductCard variant. Tagged on funnel metrics as `layout_variant`. |
+| `promo-banner` | `components/layout/PromoBanner.jsx:17`, `pages/Checkout.jsx:21` | `none` / `free-shipping-50` / `percent-off` / `urgency`. Tagged on checkout metrics as `promo_variant`. |
+| `session-replay-privacy` | `src/main.jsx:40` (pre-init REST fetch) | `none` / `default` / `strict` — SessionReplay privacy. Constructor-only. |
+| `migrate-warehouse-api` | `src/App.jsx:18` (read for feature-event emission, value unused) | Server-authoritative in `inventory-service`. |
 
-- **Debug Log**: Calls `/api/logs/debug`
-- **Info Log**: Calls `/api/logs/info`
-- **Warning Log**: Calls `/api/logs/warn`
-- **Error Log**: Calls `/api/logs/error`
+## API layer
 
-Logs are recorded on the backend with appropriate severity levels.
+All HTTP calls go through `src/services/api.js`. A single fetch wrapper:
 
-### TracesDemo.jsx
+- Prepends `VITE_API_URL` (api-gateway)
+- Sets `X-User-*` headers from the LD context — **source of truth for user identity across services**
+- Propagates Observability trace context via browser fetch instrumentation (automatic)
+- Parses JSON + throws on non-2xx
 
-Triggers tracing endpoints on the Python backend:
+If you add a new user attribute, thread it through the chain: simulator → `window.__LD_USER__` → `main.jsx` initial context → `api.js` headers → backend `_user_from_headers` → each service's context builder. Missing a link silently drops the attribute from server-side eval.
 
-- **Simple Trace**: Calls `/api/traces/simple` (automatic span)
-- **Multi-Step Trace**: Calls `/api/traces/multi-step` (manual span with 3 steps)
+## Observability + Session Replay
 
-Demonstrates distributed tracing from frontend HTTP request to backend processing.
+Every page mutation worth tracking calls `LDObserve.recordCount` / `recordHistogram` / `recordLog` / `recordError`. The full signal inventory lives in [`../SIGNALS.md`](../SIGNALS.md).
 
-## API Integration
+`FeedbackWidget.jsx` attaches `sessionSecureID` to feedback events as `o11y_session_id` so dashboards can jump from feedback → the exact Session Replay.
 
-All components use the same pattern to call the backend:
+## Running it
 
-```javascript
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+Production flow is `docker compose up -d frontend` from the repo root. That produces the nginx-served build on `:3000`.
 
-const handleAction = async () => {
-  try {
-    const response = await fetch(`${API_URL}/api/endpoint`);
-    const data = await response.json();
-    // Handle success
-  } catch (error) {
-    console.error('Failed to call backend:', error);
-    alert('Failed to call backend API. Make sure the backend server is running.');
-  }
-};
+Fast iteration against a running backend:
+
+```bash
+cd frontend
+npm install
+cp .env.example .env     # fill VITE_LD_CLIENT_SIDE_ID, point VITE_API_URL at the gateway
+npm run dev              # Vite dev server on :5173 with HMR
 ```
 
-## Environment Variables
+Note: `VITE_SERVICE_VERSION` is only set by the Dockerfile `ARG`. Running `npm run dev` gives you `'dev'` as the Observability plugin version — intentional, so local dev traffic doesn't pollute versioned dashboards.
 
-### `VITE_LD_CLIENT_SIDE_ID`
+## Build contract
 
-LaunchDarkly client-side ID for frontend SDK initialization.
+The Dockerfile takes three `ARG`s, all plumbed through `docker-compose.yml`:
 
-- **Required**: Yes (for LaunchDarkly features)
-- **Secret**: No (safe to include in frontend code)
-- **Get From**: LaunchDarkly Dashboard → Project Settings → Environments
+- `VITE_LD_CLIENT_SIDE_ID` — from `.env`
+- `VITE_API_URL` — gateway URL
+- `VITE_SERVICE_VERSION` — from the root `.env`, the single source of truth for versioning
 
-### `VITE_API_URL`
+Bumping `SERVICE_VERSION` in the root `.env` does **not** rebuild the frontend on its own — run `docker compose up -d --build frontend` or the version tagged in LD dashboards will drift from the backend.
 
-URL of the Python Flask backend API.
+## Common frontend pitfalls
 
-- **Required**: Yes
-- **Default**: `http://localhost:5000`
-- **Production**: Update to your deployed backend URL
-
-## LaunchDarkly Client-Side SDK
-
-The frontend includes LaunchDarkly's React SDK for:
-
-- Feature flag evaluation
-- Real-time flag updates
-- Client-side observability (optional)
-
-### Initialization
-
-In `main.jsx`:
-
-```javascript
-import { asyncWithLDProvider } from 'launchdarkly-react-client-sdk';
-
-const LDProvider = await asyncWithLDProvider({
-  clientSideID: import.meta.env.VITE_LD_CLIENT_SIDE_ID,
-  context: {
-    kind: 'user',
-    key: 'demo-user',
-    name: 'Demo User'
-  },
-  options: {
-    // Client-side observability can be added here
-  }
-});
-```
-
-### Using Feature Flags
-
-```javascript
-import { useFlags } from 'launchdarkly-react-client-sdk';
-
-function MyComponent() {
-  const flags = useFlags();
-  
-  return (
-    <div>
-      {flags.myFeature && <NewFeature />}
-    </div>
-  );
-}
-```
-
-## Distributed Tracing
-
-The frontend-to-backend flow demonstrates distributed tracing:
-
-1. **Frontend**: User clicks button
-2. **HTTP Request**: Frontend sends request to backend
-3. **Backend**: Python backend processes request
-4. **Trace Creation**: Backend creates span with attributes
-5. **LaunchDarkly**: Trace data sent to observability platform
-
-You can see the complete trace in LaunchDarkly's Observability dashboard, showing:
-- Request origin (frontend)
-- Backend processing time
-- Span attributes
-- Any errors or logs
-
-## Development
-
-### Adding New Demo Components
-
-1. Create new component in `src/components/`
-2. Import and add to `DashboardLayout.jsx`
-3. Follow existing patterns for API calls
-4. Update documentation
-
-### Styling
-
-Uses inline styles for simplicity. Key patterns:
-
-- Cards: White background, rounded corners, shadow
-- Buttons: Colored backgrounds, hover effects
-- Success/Error states: Green/Red color coding
-
-### Error Handling
-
-All API calls include try/catch blocks:
-
-```javascript
-try {
-  const response = await fetch(url);
-  const data = await response.json();
-  // Success handling
-} catch (error) {
-  console.error('Error:', error);
-  alert('Operation failed. Check console.');
-}
-```
-
-## Troubleshooting
-
-### Backend Connection Failed
-
-**Symptom**: "Failed to call backend API" alerts
-
-**Solutions**:
-1. Ensure backend is running: http://localhost:5000/api/health
-2. Check `VITE_API_URL` in `.env`
-3. Look for CORS errors in browser console
-4. Verify backend CORS is configured correctly
-
-### LaunchDarkly SDK Not Initializing
-
-**Symptom**: Feature flags not working
-
-**Solutions**:
-1. Verify `VITE_LD_CLIENT_SIDE_ID` is set correctly
-2. Check browser console for SDK errors
-3. Ensure client-side ID (not SDK key) is used
-4. Check network tab for LaunchDarkly API calls
-
-### Build Errors
-
-**Symptom**: `npm run build` fails
-
-**Solutions**:
-1. Delete `node_modules` and run `npm install`
-2. Check Node.js version: `node --version` (should be 16+)
-3. Clear Vite cache: `rm -rf node_modules/.vite`
-
-### Hot Reload Not Working
-
-**Symptom**: Changes not reflected in browser
-
-**Solutions**:
-1. Restart dev server: Stop and run `npm run dev` again
-2. Hard refresh browser: Cmd+Shift+R (Mac) or Ctrl+Shift+R (Windows)
-3. Check for console errors
-
-## Code Examples
-
-### Calling Error Endpoint
-
-```javascript
-const handleManualError = async () => {
-  try {
-    const response = await fetch(`${API_URL}/api/errors/manual`);
-    const data = await response.json();
-    console.log('Error recorded:', data);
-    alert(`Error recorded: ${data.error_message}`);
-  } catch (error) {
-    console.error('Failed:', error);
-  }
-};
-```
-
-### Calling Trace Endpoint
-
-```javascript
-const handleTrace = async () => {
-  try {
-    const response = await fetch(`${API_URL}/api/traces/simple`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-    const data = await response.json();
-    console.log('Trace created:', data);
-  } catch (error) {
-    console.error('Failed:', error);
-  }
-};
-```
-
-## Dependencies
-
-### Core Dependencies
-
-- `react` (^18.3.1) - UI library
-- `react-dom` (^18.3.1) - React DOM renderer
-- `launchdarkly-react-client-sdk` (^3.0.0) - LaunchDarkly React SDK
-- `launchdarkly-js-client-sdk` (^3.7.0) - LaunchDarkly JS SDK
-- `@launchdarkly/observability` (^0.4.7) - Observability plugin (optional)
-- `@launchdarkly/session-replay` (^0.4.0) - Session replay (optional)
-
-### Dev Dependencies
-
-- `vite` (^6.0.1) - Build tool
-- `@vitejs/plugin-react` (^4.3.4) - React plugin for Vite
-
-## Best Practices
-
-1. **Always check backend status** before making requests
-2. **Provide clear user feedback** for all actions
-3. **Handle errors gracefully** with user-friendly messages
-4. **Use environment variables** for configuration
-5. **Include loading states** for async operations
-6. **Log errors to console** for debugging
-
-## Architecture Notes
-
-### Why Frontend + Backend?
-
-This architecture demonstrates:
-- **Distributed Tracing**: See request flow across services
-- **Realistic Patterns**: How real applications integrate observability
-- **Backend Focus**: Python observability is the primary focus
-- **Frontend Simplicity**: React provides clean, interactive UI
-
-### Alternative: Backend Only
-
-You could simplify by removing React and using:
-- Plain HTML with vanilla JavaScript
-- Flask templates with Jinja2
-- Command-line scripts
-
-The current setup provides the best balance of realism and usability for training.
-
-## Resources
-
-- [LaunchDarkly React SDK Docs](https://docs.launchdarkly.com/sdk/client-side/react/react-web)
-- [Vite Documentation](https://vitejs.dev/)
-- [React Documentation](https://react.dev/)
-
-## Support
-
-For issues or questions:
-- [LaunchDarkly Support](https://support.launchdarkly.com/)
-- [LaunchDarkly Community](https://launchdarkly.com/community/)
-
-
+- **Constructor-only SessionReplay privacy.** Changing `session-replay-privacy` mid-session has no effect. Reload.
+- **Cart state lives in localStorage** (`ld-store-cart`). `Checkout.jsx` redirects to `/cart` if `cartItems.length === 0`. Empty cart = no checkout = no `payment-processor-migration` eval.
+- **Error Boundary** in `components/infrastructure/` catches render-phase errors and calls `LDObserve.recordError`. Async errors still need try/catch.
+- **Nginx config** in `nginx.conf` must pass through `/api/*` — both for API calls and so the LD SDK's network instrumentation sees a same-origin response. Changing Nginx routing is usually the root cause if traces suddenly stop propagating.
+- **CSP headers** in `index.html` allow LD domains. If you see console errors about blocked connections to `*.launchdarkly.com` after changing the meta tag, this is why.

@@ -282,7 +282,9 @@ def maybe_get_warehouse_error(endpoint: str) -> Optional[WarehouseAPIError]:
     if api_version == "v3":
         return None
 
-    # v1 (legacy) has a very low background error rate (~1%)
+    # v1 (legacy) is clean by default: WAREHOUSE_V1_ERRORS is empty so this
+    # loop is a no-op. Left in place so you can add low-rate v1 baseline
+    # errors without restructuring the branch.
     if api_version == "v1":
         for scenario in WAREHOUSE_V1_ERRORS:
             if not _scenario_matches_endpoint(scenario, endpoint):

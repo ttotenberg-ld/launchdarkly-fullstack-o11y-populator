@@ -605,10 +605,14 @@ class ComprehensiveSessionScenario:
             await page.goto(f"{FRONTEND_URL}/products", wait_until='domcontentloaded', timeout=10000)
             await HumanTypist.quick_glance()
         
-        # Find search input
+        # Find search input. On mobile viewports (<=768px) the navbar search
+        # is display:none — the element is in the DOM but not actionable, so
+        # skip straight to the URL-navigation branch the way a mobile user
+        # would (there is no hamburger/search-icon to open).
         search_input = page.locator('[data-testid="search-input"], input[type="search"], input[placeholder*="earch"]')
-        
-        if await search_input.count() > 0:
+        is_mobile = HumanClicker._is_mobile_viewport(page)
+
+        if not is_mobile and await search_input.count() > 0:
             # Pick a search query
             query_data = random.choice(SEARCH_QUERIES)
             final_query = query_data[0]
