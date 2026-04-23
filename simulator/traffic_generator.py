@@ -191,14 +191,18 @@ class HumanTypist:
     """Simulates human-like typing behavior with mistakes and corrections."""
     
     @staticmethod
-    async def type_like_human(page: Page, selector: str, text: str, 
+    async def type_like_human(page: Page, selector: str, text: str,
                               make_typos: bool = True, wpm: int = 40):
         """Type text with human-like delays, occasional typos, and corrections."""
         element = page.locator(selector)
         if await element.count() == 0:
             return False
-        
-        await element.click()
+
+        # Focus the field. On mobile the shipping form inputs sit below
+        # the fold; the default .click() auto-scroll lands them under the
+        # 70px sticky navbar and the actionability check times out. Go
+        # through the mobile-safe helper which center-scrolls + taps.
+        await HumanClicker._actionable_click(page, element.first)
         await asyncio.sleep(random.uniform(0.2, 0.5))  # Pause after clicking
         
         # Calculate base delay between keystrokes (average typing speed)
@@ -262,23 +266,74 @@ class HumanClicker:
     """Simulates human-like clicking and navigation behavior."""
     
     @staticmethod
-    async def click_with_hesitation(page: Page, selector: str, 
+    async def click_with_hesitation(page: Page, selector: str,
                                      hesitate_before: bool = True,
                                      hesitate_after: bool = False):
-        """Click an element with optional hesitation before/after."""
+        """Click an element with optional hesitation before/after.
+
+        On mobile viewports the element is scrolled into view explicitly
+        and dispatched as a touch tap — click()'s auto-scroll can leave
+        below-fold targets under the 70px sticky navbar, failing the
+        pointer-events actionability check until the 10s timeout fires.
+        Device presets have has_touch=True so tap() is the realistic
+        primitive anyway.
+        """
         element = page.locator(selector)
         if await element.count() == 0:
             return False
-        
+
         if hesitate_before:
             await HumanTypist.hesitate(0.3, 1.0)
-        
-        await element.click()
-        
+
+        await HumanClicker._actionable_click(page, element.first)
+
         if hesitate_after:
             await HumanTypist.hesitate(0.2, 0.5)
-        
+
         return True
+
+    @staticmethod
+    async def _actionable_click(page: Page, locator):
+        """Desktop: plain click(). Mobile: center-scroll, tap, JS fallback.
+
+        Playwright's default scrollIntoView (used by .click()/.tap()'s
+        actionability step) aligns below-fold targets to `block:'nearest'`,
+        which on our site lands them at viewport-top — directly under the
+        70px sticky navbar (z-index 100). elementFromPoint then returns
+        the navbar and the pointer-events check times out at 10s.
+
+        Workaround, in three steps:
+          1. Center the element ourselves via `scrollIntoView({block:'center'})`
+             so it's clear of both the sticky navbar at top and the fixed
+             Feedback/Chat widgets at bottom-right.
+          2. `tap(force=True)` with a 4s cap so we still produce real
+             touchstart/touchend events for rrweb replay when it works.
+          3. If tap is hung (observed on WebKit/iOS where the scroll race
+             still trips something), dispatch a synthetic click via JS.
+             React Router handles <a> navigation and button onClick fires
+             normally — we lose the touch-event pair for this one action
+             but the session's other touch-scroll activity is intact, and
+             the session makes progress rather than eating 10s of budget.
+        """
+        if HumanClicker._is_mobile_viewport(page):
+            try:
+                await locator.evaluate(
+                    "el => el.scrollIntoView({block: 'center', inline: 'nearest'})"
+                )
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+            try:
+                await locator.tap(force=True, timeout=4000)
+                return
+            except Exception:
+                pass
+            try:
+                await locator.evaluate("el => el.click()")
+            except Exception:
+                pass
+        else:
+            await locator.click()
     
     @staticmethod
     async def scroll_randomly(page: Page, times: int = None):
@@ -579,9 +634,9 @@ class ComprehensiveSessionScenario:
                 try:
                     idx = random.randint(0, count - 1)
                     await HumanTypist.hesitate(0.5, 1.0)
-                    await product_cards.nth(idx).click()
+                    await HumanClicker._actionable_click(page, product_cards.nth(idx))
                     await page.wait_for_selector('[data-testid="product-detail"]', timeout=10000)
-                    
+
                     self.endpoints_hit.add('/api/products/<id>')
                     results.append({'action': 'view_product_detail', 'success': True, 'phase': 'browse'})
                     
@@ -690,7 +745,7 @@ class ComprehensiveSessionScenario:
             if await demo_btn.count() > 0:
                 # Click on a demo login button
                 await HumanTypist.hesitate(0.5, 1.5)
-                await demo_btn.first.click()
+                await HumanClicker._actionable_click(page, demo_btn.first)
                 await HumanTypist.hesitate(1, 2)
                 
                 self.endpoints_hit.add('/api/login')
@@ -822,7 +877,7 @@ class ComprehensiveSessionScenario:
         if card_count > 0:
             idx = random.randint(0, card_count - 1)
             await HumanTypist.hesitate(0.5, 1.0)
-            await product_cards.nth(idx).click()
+            await HumanClicker._actionable_click(page, product_cards.nth(idx))
 
             try:
                 await page.wait_for_selector('[data-testid="product-detail"]', timeout=10000)
@@ -877,7 +932,7 @@ class ComprehensiveSessionScenario:
                 if extra_count == 0:
                     break
                 extra_idx = random.randint(0, extra_count - 1)
-                await extra_cards.nth(extra_idx).click()
+                await HumanClicker._actionable_click(page, extra_cards.nth(extra_idx))
                 await page.wait_for_selector('[data-testid="add-to-cart"]', timeout=5000)
                 await HumanTypist.hesitate(0.3, 0.7)
                 await HumanClicker.click_with_hesitation(page, '[data-testid="add-to-cart"]')
@@ -917,7 +972,7 @@ class ComprehensiveSessionScenario:
             checkout_btn = page.locator('[data-testid="checkout-button"], button:has-text("Checkout")')
             if await checkout_btn.count() > 0:
                 await HumanTypist.hesitate(0.5, 1.5)
-                await checkout_btn.click()
+                await HumanClicker._actionable_click(page, checkout_btn.first)
                 await page.wait_for_load_state('domcontentloaded', timeout=10000)
                 results.append({'action': 'start_checkout', 'success': True, 'phase': 'checkout'})
                 await HumanTypist.read_page(1, 2)
@@ -932,7 +987,7 @@ class ComprehensiveSessionScenario:
                 place_order_btn = page.locator('[data-testid="place-order"], button:has-text("Place Order")')
                 if await place_order_btn.count() > 0:
                     await HumanTypist.hesitate(1, 2)  # Think before committing
-                    await place_order_btn.click()
+                    await HumanClicker._actionable_click(page, place_order_btn.first)
                     await HumanTypist.hesitate(2, 4)
                     
                     self.endpoints_hit.add('/api/checkout')
@@ -982,7 +1037,7 @@ class ComprehensiveSessionScenario:
         continue_btn = page.locator('[data-testid="continue-to-payment"], button:has-text("Continue")')
         if await continue_btn.count() > 0:
             await HumanTypist.hesitate(0.5, 1.0)
-            await continue_btn.click()
+            await HumanClicker._actionable_click(page, continue_btn.first)
             await HumanTypist.hesitate(0.5, 1.0)
             results.append({'action': 'submit_shipping', 'success': True, 'phase': 'checkout'})
     
