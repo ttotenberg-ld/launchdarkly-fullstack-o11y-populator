@@ -957,8 +957,18 @@ class ComprehensiveSessionScenario:
                 await HumanClicker.click_with_hesitation(page, '[data-testid="cart-icon"]')
             else:
                 await page.goto(f"{FRONTEND_URL}/cart", wait_until='domcontentloaded')
-            
-            await page.wait_for_load_state('domcontentloaded', timeout=10000)
+
+            # Wait for React to hydrate the Cart component. `domcontentloaded`
+            # fires before the bundle executes, so checking selectors straight
+            # after it races: both [data-testid="empty-cart"] and
+            # [data-testid="checkout-button"] return 0 matches and the
+            # subsequent `checkout_btn.count() > 0` branch silently skips —
+            # this is what was starving /api/checkout of traffic. Wait for
+            # whichever branch Cart.jsx commits to, then continue.
+            await page.wait_for_selector(
+                '[data-testid="empty-cart"], [data-testid="checkout-button"]',
+                timeout=10000,
+            )
             results.append({'action': 'view_cart', 'success': True, 'phase': 'checkout'})
             await HumanTypist.read_page(1, 2)
             
@@ -973,7 +983,19 @@ class ComprehensiveSessionScenario:
             if await checkout_btn.count() > 0:
                 await HumanTypist.hesitate(0.5, 1.5)
                 await HumanClicker._actionable_click(page, checkout_btn.first)
-                await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                # /checkout is a client-side React Router route — the
+                # wait_for_load_state('domcontentloaded') returns immediately
+                # because the HTML document never reloads. Wait for the
+                # shipping form to actually mount, otherwise the subsequent
+                # _fill_shipping_form calls all .count()==0 and silently skip,
+                # and place-order never fires.
+                try:
+                    await page.wait_for_selector(
+                        '[data-testid="shipping-form"]',
+                        timeout=10000,
+                    )
+                except Exception:
+                    pass
                 results.append({'action': 'start_checkout', 'success': True, 'phase': 'checkout'})
                 await HumanTypist.read_page(1, 2)
                 
@@ -1043,13 +1065,25 @@ class ComprehensiveSessionScenario:
     
     async def _fill_payment_form(self, page: Page, user: dict, results: List[Dict]):
         """Fill the payment form with human-like typing."""
+        # "Continue to Payment" flips step=1→2 in Checkout.jsx, which swaps
+        # ShippingForm for PaymentForm client-side. Wait for the new form to
+        # mount before probing for card inputs — otherwise .count()==0 and
+        # every field fill silently skips, place-order is never clickable.
+        try:
+            await page.wait_for_selector(
+                '[data-testid="payment-form"]',
+                timeout=10000,
+            )
+        except Exception:
+            pass
+
         fields = [
             ('[data-testid="card-number"], input[name="cardNumber"]', '4242 4242 4242 4242', 35),
             ('[data-testid="card-name"], input[name="cardName"]', user['name'], 45),
             ('[data-testid="card-expiry"], input[name="expiry"]', '12/25', 50),
             ('[data-testid="card-cvv"], input[name="cvv"]', '123', 60),
         ]
-        
+
         for selector, value, wpm in fields:
             element = page.locator(selector)
             if await element.count() > 0:

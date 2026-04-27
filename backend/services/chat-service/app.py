@@ -328,7 +328,14 @@ def chat():
             DEFAULT_AI_CONFIG,
             {},
         )
-        tracker = config_value.tracker
+        # ldai SDK API shift: <0.18.0 exposed a single `.tracker` attr; 0.18.0+
+        # replaced it with `.create_tracker()` factory (None when disabled) so
+        # each invocation gets a fresh runId and at-most-once metric semantics.
+        # Support both so a teammate's pin upgrade doesn't 500 the chat path.
+        if hasattr(config_value, 'create_tracker'):
+            tracker = config_value.create_tracker() if config_value.create_tracker else None
+        else:
+            tracker = getattr(config_value, 'tracker', None)
 
         model_name = config_value.model.name if config_value.model else 'gemma3:1b'
         span.set_attribute('llm.model', model_name)
@@ -366,28 +373,30 @@ def chat():
             # Extract response text and strip <think> tags (DeepSeek R1)
             answer = _strip_think_tags(response['message']['content'])
 
-            # Track metrics via LD AI SDK tracker
-            tracker.track_success()
-
-            input_tokens = response.get('prompt_eval_count', 0)
-            output_tokens = response.get('eval_count', 0)
-            tracker.track_tokens(TokenUsage(
-                input=input_tokens,
-                output=output_tokens,
-                total=input_tokens + output_tokens,
-            ))
-
             # Use Ollama's own duration if available, otherwise our measured time
             ollama_duration = response.get('total_duration')
             if ollama_duration:
                 duration_ms = ollama_duration / 1_000_000  # nanoseconds → ms
-            tracker.track_duration(duration_ms)
 
+            input_tokens = response.get('prompt_eval_count', 0)
+            output_tokens = response.get('eval_count', 0)
             # Time to first token = model load + prompt evaluation (before generation starts)
             load_ns = response.get('load_duration', 0)
             prompt_eval_ns = response.get('prompt_eval_duration', 0)
             ttft_ms = (load_ns + prompt_eval_ns) / 1_000_000  # nanoseconds → ms
-            tracker.track_time_to_first_token(ttft_ms)
+
+            # Track metrics via LD AI SDK tracker. tracker is None when the
+            # AI Config is disabled (0.18.0+) — span attributes still record
+            # the call so non-LD telemetry doesn't lose the request.
+            if tracker:
+                tracker.track_success()
+                tracker.track_tokens(TokenUsage(
+                    input=input_tokens,
+                    output=output_tokens,
+                    total=input_tokens + output_tokens,
+                ))
+                tracker.track_duration(duration_ms)
+                tracker.track_time_to_first_token(ttft_ms)
 
             span.set_attribute('llm.input_tokens', input_tokens)
             span.set_attribute('llm.output_tokens', output_tokens)
@@ -409,12 +418,15 @@ def chat():
                 },
             )
 
-            # Cache the tracker so delayed feedback can be attributed
+            # Cache the tracker so delayed feedback can be attributed.
+            # Skip when AI Config is disabled (tracker is None) — feedback
+            # endpoint already no-ops on cache miss.
             generation_id = uuid.uuid4().hex[:16]
-            _tracker_cache[generation_id] = tracker
-            # Evict oldest entries if cache is full
-            while len(_tracker_cache) > MAX_TRACKER_CACHE:
-                _tracker_cache.popitem(last=False)
+            if tracker:
+                _tracker_cache[generation_id] = tracker
+                # Evict oldest entries if cache is full
+                while len(_tracker_cache) > MAX_TRACKER_CACHE:
+                    _tracker_cache.popitem(last=False)
 
             # Persist the exchange. Failures here shouldn't break the chat
             # response — log and move on. Wrapped in its own span via the
@@ -453,7 +465,8 @@ def chat():
             })
 
         except Exception as e:
-            tracker.track_error()
+            if tracker:
+                tracker.track_error()
             record_exception(e, {
                 **get_common_attributes(SERVICE_NAME, '/chat'),
                 'model': model_name,
