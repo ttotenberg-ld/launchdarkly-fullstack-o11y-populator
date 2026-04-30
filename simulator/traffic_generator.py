@@ -1451,6 +1451,11 @@ class TrafficGenerator:
         # Per-profile counter — surfaces the browser mix in the stats line so
         # you can eyeball whether weighting is landing roughly as specified.
         self.profile_counts: Dict[str, int] = {}
+        # Set when an engine subprocess dies externally (e.g., cgroup OOM
+        # kills WPEWebProcess / chrome-headless). The handle becomes a
+        # permanently-dead reference; we exit so Docker's restart policy
+        # brings the container back with fresh engines.
+        self.fatal_error: Optional[str] = None
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(SESSION_LOG_FILE), exist_ok=True)
@@ -1774,6 +1779,20 @@ class TrafficGenerator:
 
             try:
                 while True:
+                    # If any engine's subprocess died (cgroup OOM, crash),
+                    # the handle is dead and can't be relaunched in-place.
+                    # Exit so Docker restart brings us back fresh.
+                    for name, browser in self.engines.items():
+                        if not browser.is_connected():
+                            self.fatal_error = (
+                                f"engine '{name}' lost connection — likely "
+                                f"OOM-killed; exiting for container restart"
+                            )
+                            break
+                    if self.fatal_error:
+                        print(f"\n[FATAL] {self.fatal_error}\n")
+                        break
+
                     try:
                         # Spawn session without waiting for it to complete
                         asyncio.create_task(session_wrapper())
@@ -1808,6 +1827,9 @@ def main():
     """Main entry point."""
     generator = TrafficGenerator(sessions_per_minute=SESSIONS_PER_MINUTE)
     generator.run()
+    if generator.fatal_error:
+        print(f"Exiting non-zero: {generator.fatal_error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
