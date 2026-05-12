@@ -33,6 +33,14 @@ SESSIONS_PER_MINUTE = int(os.getenv('SESSIONS_PER_MINUTE', '2'))  # Fewer sessio
 MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
 TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '60'))  # seconds
 SESSION_TIMEOUT = int(os.getenv('SESSION_TIMEOUT', '90'))  # hard cap per session
+# Recycle each engine after this many sessions on it. WebKit's WPEWebProcess
+# leaks memory in long-running headless use; once the cgroup hits its limit
+# the renderer is OOM-killed but the main browser process stays connected,
+# which silently kills traffic without tripping our liveness check.
+RECYCLE_BROWSER_AFTER_SESSIONS = int(os.getenv('RECYCLE_BROWSER_AFTER_SESSIONS', '100'))
+# Backstop for the "renderer died, main process lies" case: if this many
+# sessions fail back-to-back, give up and exit so Docker restarts us fresh.
+MAX_CONSECUTIVE_SESSION_ERRORS = int(os.getenv('MAX_CONSECUTIVE_SESSION_ERRORS', '10'))
 
 # --- Browser / device diversity -------------------------------------------
 #
@@ -1456,6 +1464,12 @@ class TrafficGenerator:
         # permanently-dead reference; we exit so Docker's restart policy
         # brings the container back with fresh engines.
         self.fatal_error: Optional[str] = None
+        # Per-engine session count, used to recycle engines before WebKit's
+        # WPEWebProcess leak pushes the container cgroup to its memory limit.
+        self.session_count_per_engine: Dict[str, int] = {}
+        # Backstop for the "renderer died but is_connected() still returns
+        # True" case: counts back-to-back session failures, reset on success.
+        self.consecutive_errors: int = 0
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(SESSION_LOG_FILE), exist_ok=True)
@@ -1584,12 +1598,31 @@ class TrafficGenerator:
             profile_label = profile[5]
             engine_name = profile[1]
             self.profile_counts[profile_label] = self.profile_counts.get(profile_label, 0) + 1
+            self.session_count_per_engine[engine_name] = (
+                self.session_count_per_engine.get(engine_name, 0) + 1
+            )
 
             print(f"[{datetime.now().isoformat()}] Session {session_id} starting: "
                   f"{user['email']} [{profile_label}]")
 
-            context = await self._new_context_for_profile(profile)
-            page = await context.new_page()
+            try:
+                context = await self._new_context_for_profile(profile)
+                page = await context.new_page()
+            except Exception as e:
+                # Context/page creation failed — usually means the engine's
+                # main process died (cgroup OOM, segfault). Count it as a
+                # session error so the consecutive-error backstop can fire.
+                self.error_count += 1
+                self.consecutive_errors += 1
+                print(f"[{datetime.now().isoformat()}] Session {session_id} "
+                      f"failed to start on '{engine_name}': {e}")
+                return {
+                    'session_id': session_id, 'scenario': 'comprehensive_session',
+                    'user': user, 'error': f'browser_init: {e}',
+                    'browser_profile': profile_label,
+                    'engine': engine_name,
+                    'timestamp': datetime.now().isoformat(),
+                }
 
             # --- Stealth: engine-specific automation masking ---
             await page.add_init_script(self._stealth_script(engine_name))
@@ -1671,6 +1704,7 @@ class TrafficGenerator:
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if result is None:
+                self.consecutive_errors += 1
                 return {
                     'session_id': session_id, 'scenario': 'comprehensive_session',
                     'user': user, 'error': 'unknown',
@@ -1687,8 +1721,10 @@ class TrafficGenerator:
             failed = bool(failed_actions)
             if failed:
                 self.error_count += 1
+                self.consecutive_errors += 1
             else:
                 self.success_count += 1
+                self.consecutive_errors = 0
 
             endpoints = result.get('endpoints_hit', [])
             duration = result.get('session_duration_seconds', 0)
@@ -1705,6 +1741,69 @@ class TrafficGenerator:
                       f"action={fa.get('action')} err={err}")
             return result
     
+    async def _launch_engine(self, name: str) -> Browser:
+        """Launch a single Playwright engine. Used for both initial start
+        and post-recycle relaunch so the args stay in one place."""
+        if name == 'chromium':
+            return await self.playwright.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled'],
+            )
+        if name == 'firefox':
+            return await self.playwright.firefox.launch(headless=True)
+        if name == 'webkit':
+            return await self.playwright.webkit.launch(headless=True)
+        raise ValueError(f"unknown engine: {name}")
+
+    async def _recycle_engine(self, name: str):
+        """Close an engine and launch a fresh one. Caller must ensure no
+        sessions are in flight on this engine (drain via semaphore first)."""
+        prev = self.session_count_per_engine.get(name, 0)
+        print(f"[{datetime.now().isoformat()}] Recycling engine '{name}' "
+              f"after {prev} sessions")
+        old = self.engines.get(name)
+        if old is not None:
+            try:
+                await asyncio.wait_for(old.close(), timeout=15)
+            except Exception as e:
+                # Old handle may already be dead; logging is enough.
+                print(f"  warn: close({name}) raised {e!r}")
+        self.engines[name] = await self._launch_engine(name)
+        self.session_count_per_engine[name] = 0
+        print(f"  ✓ Engine '{name}' recycled")
+
+    async def _drain_and_recycle_if_needed(self):
+        """If any engine has hit its recycle threshold, acquire every
+        semaphore slot (which blocks until in-flight sessions finish), then
+        recycle the due engines, then release the slots."""
+        due = [
+            name for name, count in self.session_count_per_engine.items()
+            if count >= RECYCLE_BROWSER_AFTER_SESSIONS
+        ]
+        if not due:
+            return
+
+        print(f"[{datetime.now().isoformat()}] Recycle due for: {due}. "
+              f"Draining {MAX_CONCURRENT_BROWSERS} semaphore slots...")
+        held = 0
+        try:
+            for _ in range(MAX_CONCURRENT_BROWSERS):
+                await self.semaphore.acquire()
+                held += 1
+            # All in-flight sessions have released their slot. Safe to close.
+            for name in due:
+                try:
+                    await self._recycle_engine(name)
+                except Exception as e:
+                    self.fatal_error = (
+                        f"engine '{name}' recycle failed: {e!r} — exiting "
+                        f"for container restart"
+                    )
+                    break
+        finally:
+            for _ in range(held):
+                self.semaphore.release()
+
     async def run_forever(self):
         """Run traffic generation forever with overlapping sessions."""
         interval = 60.0 / self.sessions_per_minute
@@ -1743,13 +1842,13 @@ class TrafficGenerator:
             # from automated browsers, so we mask automation signals via
             # per-engine stealth init scripts in run_session.
             self.playwright = p
-            self.engines['chromium'] = await p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled'],
-            )
-            self.engines['firefox'] = await p.firefox.launch(headless=True)
-            self.engines['webkit'] = await p.webkit.launch(headless=True)
+            for name in ('chromium', 'firefox', 'webkit'):
+                self.engines[name] = await self._launch_engine(name)
+                self.session_count_per_engine[name] = 0
             print(f"  ✓ Launched engines: chromium, firefox, webkit\n")
+            print(f"  ✓ Will recycle each engine every "
+                  f"{RECYCLE_BROWSER_AFTER_SESSIONS} sessions; exit after "
+                  f"{MAX_CONSECUTIVE_SESSION_ERRORS} consecutive failures\n")
 
             # Track running session tasks
             running_tasks: set = set()
@@ -1765,12 +1864,17 @@ class TrafficGenerator:
                     if self.session_count % 5 == 0:
                         error_rate = (self.error_count / self.session_count * 100) if self.session_count > 0 else 0
                         mix = ', '.join(f"{k}={v}" for k, v in sorted(self.profile_counts.items()))
+                        engine_counts = ', '.join(
+                            f"{k}={v}" for k, v in sorted(self.session_count_per_engine.items())
+                        )
                         print(f"\n{'='*50}")
-                        print(f"[Stats] Sessions: {self.session_count}, "
+                        print(f"[Stats]  Sessions: {self.session_count}, "
                               f"Success: {self.success_count}, "
                               f"Errors: {self.error_count} ({error_rate:.1f}%), "
-                              f"Active: {len(running_tasks)}")
-                        print(f"[Mix]   {mix}")
+                              f"Active: {len(running_tasks)}, "
+                              f"ConsecErrs: {self.consecutive_errors}")
+                        print(f"[Mix]    {mix}")
+                        print(f"[Engine] sessions-since-launch: {engine_counts}")
                         print(f"{'='*50}\n")
                 except Exception as e:
                     print(f"Error in session: {e}")
@@ -1789,6 +1893,25 @@ class TrafficGenerator:
                                 f"OOM-killed; exiting for container restart"
                             )
                             break
+                    if self.fatal_error:
+                        print(f"\n[FATAL] {self.fatal_error}\n")
+                        break
+
+                    # Backstop: is_connected() returns True even when the
+                    # renderer subprocess (e.g., WebKit's WPEWebProcess) has
+                    # been OOM-killed under the main browser process. If
+                    # sessions are failing back-to-back, give up and let
+                    # Docker restart us.
+                    if self.consecutive_errors >= MAX_CONSECUTIVE_SESSION_ERRORS:
+                        self.fatal_error = (
+                            f"{self.consecutive_errors} consecutive session "
+                            f"failures — exiting for container restart"
+                        )
+                        print(f"\n[FATAL] {self.fatal_error}\n")
+                        break
+
+                    # Proactively recycle leaky engines before they OOM.
+                    await self._drain_and_recycle_if_needed()
                     if self.fatal_error:
                         print(f"\n[FATAL] {self.fatal_error}\n")
                         break
