@@ -33,11 +33,10 @@ SESSIONS_PER_MINUTE = int(os.getenv('SESSIONS_PER_MINUTE', '2'))  # Fewer sessio
 MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
 TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '60'))  # seconds
 SESSION_TIMEOUT = int(os.getenv('SESSION_TIMEOUT', '90'))  # hard cap per session
-# Recycle each engine after this many sessions on it. WebKit's WPEWebProcess
-# leaks memory in long-running headless use; once the cgroup hits its limit
-# the renderer is OOM-killed but the main browser process stays connected,
-# which silently kills traffic without tripping our liveness check.
-RECYCLE_BROWSER_AFTER_SESSIONS = int(os.getenv('RECYCLE_BROWSER_AFTER_SESSIONS', '100'))
+# Round-robin recycle one engine on a timer to bound long-running renderer
+# memory growth (WebKit's WPEWebProcess in particular). This value is the
+# full-rotation period; with 3 engines we recycle one every INTERVAL/3 minutes.
+RECYCLE_INTERVAL_MINUTES = int(os.getenv('RECYCLE_INTERVAL_MINUTES', '30'))
 # Backstop for the "renderer died, main process lies" case: if this many
 # sessions fail back-to-back, give up and exit so Docker restarts us fresh.
 MAX_CONSECUTIVE_SESSION_ERRORS = int(os.getenv('MAX_CONSECUTIVE_SESSION_ERRORS', '10'))
@@ -1756,11 +1755,12 @@ class TrafficGenerator:
         raise ValueError(f"unknown engine: {name}")
 
     async def _recycle_engine(self, name: str):
-        """Close an engine and launch a fresh one. Caller must ensure no
-        sessions are in flight on this engine (drain via semaphore first)."""
+        """Close an engine and launch a fresh one. Sessions mid-flight on the
+        old engine will fail when it closes — fine for synthetic traffic, the
+        consecutive-error backstop catches any cascading mess."""
         prev = self.session_count_per_engine.get(name, 0)
         print(f"[{datetime.now().isoformat()}] Recycling engine '{name}' "
-              f"after {prev} sessions")
+              f"({prev} sessions since last launch)")
         old = self.engines.get(name)
         if old is not None:
             try:
@@ -1772,37 +1772,30 @@ class TrafficGenerator:
         self.session_count_per_engine[name] = 0
         print(f"  ✓ Engine '{name}' recycled")
 
-    async def _drain_and_recycle_if_needed(self):
-        """If any engine has hit its recycle threshold, acquire every
-        semaphore slot (which blocks until in-flight sessions finish), then
-        recycle the due engines, then release the slots."""
-        due = [
-            name for name, count in self.session_count_per_engine.items()
-            if count >= RECYCLE_BROWSER_AFTER_SESSIONS
-        ]
-        if not due:
-            return
-
-        print(f"[{datetime.now().isoformat()}] Recycle due for: {due}. "
-              f"Draining {MAX_CONCURRENT_BROWSERS} semaphore slots...")
-        held = 0
-        try:
-            for _ in range(MAX_CONCURRENT_BROWSERS):
-                await self.semaphore.acquire()
-                held += 1
-            # All in-flight sessions have released their slot. Safe to close.
-            for name in due:
-                try:
-                    await self._recycle_engine(name)
-                except Exception as e:
-                    self.fatal_error = (
-                        f"engine '{name}' recycle failed: {e!r} — exiting "
-                        f"for container restart"
-                    )
-                    break
-        finally:
-            for _ in range(held):
-                self.semaphore.release()
+    async def _recycle_loop(self):
+        """Background task: round-robin recycle one engine on a timer. Runs
+        independently of the session loop — much simpler than the previous
+        drain-and-recycle approach, and easier to verify it's firing."""
+        engines_to_cycle = ['chromium', 'firefox', 'webkit']
+        sleep_seconds = RECYCLE_INTERVAL_MINUTES * 60 / len(engines_to_cycle)
+        idx = 0
+        while not self.fatal_error:
+            try:
+                await asyncio.sleep(sleep_seconds)
+            except asyncio.CancelledError:
+                return
+            if self.fatal_error:
+                return
+            name = engines_to_cycle[idx % len(engines_to_cycle)]
+            idx += 1
+            try:
+                await self._recycle_engine(name)
+            except Exception as e:
+                self.fatal_error = (
+                    f"engine '{name}' recycle failed: {e!r} — "
+                    f"exiting for container restart"
+                )
+                return
 
     async def run_forever(self):
         """Run traffic generation forever with overlapping sessions."""
@@ -1846,9 +1839,12 @@ class TrafficGenerator:
                 self.engines[name] = await self._launch_engine(name)
                 self.session_count_per_engine[name] = 0
             print(f"  ✓ Launched engines: chromium, firefox, webkit\n")
-            print(f"  ✓ Will recycle each engine every "
-                  f"{RECYCLE_BROWSER_AFTER_SESSIONS} sessions; exit after "
-                  f"{MAX_CONSECUTIVE_SESSION_ERRORS} consecutive failures\n")
+            recycle_period_s = RECYCLE_INTERVAL_MINUTES * 60 / 3
+            print(f"  ✓ Recycling one engine every {recycle_period_s/60:.1f} min "
+                  f"(each engine every {RECYCLE_INTERVAL_MINUTES} min); "
+                  f"exit after {MAX_CONSECUTIVE_SESSION_ERRORS} consecutive "
+                  f"failures\n")
+            recycle_task = asyncio.create_task(self._recycle_loop())
 
             # Track running session tasks
             running_tasks: set = set()
@@ -1910,12 +1906,6 @@ class TrafficGenerator:
                         print(f"\n[FATAL] {self.fatal_error}\n")
                         break
 
-                    # Proactively recycle leaky engines before they OOM.
-                    await self._drain_and_recycle_if_needed()
-                    if self.fatal_error:
-                        print(f"\n[FATAL] {self.fatal_error}\n")
-                        break
-
                     try:
                         # Spawn session without waiting for it to complete
                         asyncio.create_task(session_wrapper())
@@ -1930,6 +1920,12 @@ class TrafficGenerator:
                         print(f"Error in traffic loop: {e}")
                         await asyncio.sleep(interval)
             finally:
+                # Stop the recycle background task before we tear engines down.
+                recycle_task.cancel()
+                try:
+                    await recycle_task
+                except (asyncio.CancelledError, Exception):
+                    pass
                 # Wait for running sessions to complete before closing
                 if running_tasks:
                     print(f"Waiting for {len(running_tasks)} active sessions to complete...")

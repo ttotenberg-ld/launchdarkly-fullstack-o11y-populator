@@ -382,11 +382,13 @@ services:
     networks:
       - ld-observability
     restart: unless-stopped
-    # Playwright needs more resources
+    # Playwright needs more resources. 3 engines × up to 3 concurrent contexts
+    # blows past 2G during peak; 4G gives headroom + room for the periodic
+    # recycle to overlap old+new engine processes briefly without OOM.
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
 
 volumes:
   ollama_data:
