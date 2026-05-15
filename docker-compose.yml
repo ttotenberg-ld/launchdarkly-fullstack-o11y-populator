@@ -431,6 +431,13 @@ services:
     volumes:
       # Read-only docker.sock so we can resolve cgroup IDs → container names.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    # /dev/kmsg must be exposed as a device, not just relying on pid:host —
+    # without it dmesg falls back to klogctl(SYSLOG_ACTION_READ), which has
+    # different follow semantics (drain-and-exit, not tail-forever). The
+    # device mount is the minimum-privilege way to give dmesg a working
+    # /dev/kmsg without going full `privileged: true`.
+    devices:
+      - /dev/kmsg:/dev/kmsg
     networks:
       - ld-observability
     restart: unless-stopped

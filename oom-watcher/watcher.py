@@ -16,7 +16,7 @@ import sys
 import time
 import signal
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import docker
@@ -113,41 +113,76 @@ def resolve_container(client: Optional[docker.DockerClient], cid: str) -> dict:
         return {"container.id": cid}
 
 
+# Parses the iso timestamp prefix `[2026-05-15T16:31:27,...]` from dmesg lines.
+# We use it to drop entries older than our process start time so we never emit
+# spans for historical OOMs, regardless of whether `--follow-new` is honored
+# or dmesg falls back to a klogctl path that replays the buffer.
+TS_RE = re.compile(r"^\[(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
+
+
+def parse_dmesg_ts(line: str) -> Optional[datetime]:
+    m = TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        # dmesg --time-format iso emits LOCAL time without a tz suffix; treat
+        # it as naive and compare against a naive `now`. Off by host-tz at
+        # worst, which is fine because the filter is just "older than startup".
+        return datetime.fromisoformat(m.group("ts"))
+    except Exception:
+        return None
+
+
 def tail_dmesg():
     """Yield each kernel ring-buffer line as it arrives.
 
-    `--follow-new` (util-linux 2.30+) only emits new entries — without it,
-    `--follow` replays the entire ring buffer first, which on a long-running
-    box means tens of MB of stale events referencing container IDs from days
-    ago that no longer exist (so cgroup→name resolution returns NotFound).
-    `--time-format iso` gives us parseable timestamps in the line.
+    Re-spawns dmesg if it exits (the klogctl fallback path drains and
+    returns EOF rather than following). Backoff capped at 30s so a missing
+    /dev/kmsg device doesn't spin the CPU.
     """
-    proc = subprocess.Popen(
-        ["dmesg", "--follow-new", "--time-format", "iso"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    try:
-        for line in proc.stdout:
-            yield line.rstrip("\n")
-    finally:
+    backoff = 1.0
+    while True:
+        proc = subprocess.Popen(
+            ["dmesg", "--follow-new", "--time-format", "iso"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            pass
+            for line in proc.stdout:
+                yield line.rstrip("\n")
+                backoff = 1.0  # reset once we've seen any output
+            stderr = proc.stderr.read() if proc.stderr else ""
+            print(
+                f"[oom-watcher] dmesg exited rc={proc.poll()} "
+                f"stderr={stderr.strip()!r} — re-spawning in {backoff:.0f}s",
+                flush=True,
+            )
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 30.0)
 
 
 def main():
     tracer = init_ld_tracer()
     docker_client = get_docker_client()
+    # Process start time — drop dmesg entries older than this. This is the
+    # bulletproof "ignore historical buffer" filter, independent of whether
+    # --follow-new is honored by this dmesg/kernel combo.
+    started_at = datetime.now()
     print(f"[oom-watcher] started ({SERVICE_NAME} v{SERVICE_VERSION} env={ENVIRONMENT})", flush=True)
     print(f"[oom-watcher] tailing dmesg; docker={'connected' if docker_client else 'unavailable'}", flush=True)
+    print(f"[oom-watcher] filtering dmesg entries older than {started_at.isoformat()}", flush=True)
 
     # Pending OOM event waiting for its "Killed process" follow-up line.
     pending: Optional[dict] = None
+    suppressed_old = 0
 
     def shutdown(_signum, _frame):
         print("[oom-watcher] shutdown signal received", flush=True)
@@ -158,8 +193,24 @@ def main():
 
     for raw in tail_dmesg():
         try:
+            # Drop historical entries: if the dmesg timestamp is older than
+            # when we started, this is a replay of the kernel buffer, not a
+            # new event. Only count suppression for OOM-kill lines so we
+            # don't spam the suppression counter for unrelated kernel chatter.
+            ts = parse_dmesg_ts(raw)
+
             m = OOM_KILL_RE.search(raw)
             if m:
+                if ts and ts < started_at:
+                    suppressed_old += 1
+                    if suppressed_old in (1, 10, 100, 1000) or suppressed_old % 1000 == 0:
+                        print(
+                            f"[oom-watcher] suppressed {suppressed_old} historical "
+                            f"OOM entries (older than startup)",
+                            flush=True,
+                        )
+                    pending = None
+                    continue
                 pending = m.groupdict()
                 pending["raw"] = raw
                 continue
