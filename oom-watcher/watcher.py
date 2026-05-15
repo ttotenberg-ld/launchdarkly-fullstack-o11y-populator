@@ -24,9 +24,7 @@ import ldclient
 from ldclient.config import Config
 from ldobserve import ObservabilityConfig, ObservabilityPlugin
 from opentelemetry import trace
-from opentelemetry._logs import get_logger, set_logger_provider
-from opentelemetry.sdk._logs import LoggerProvider, LogRecord
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.trace import Status, StatusCode
 
 SERVICE_NAME = "oom-watcher"
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "1.0.0")
@@ -53,8 +51,17 @@ KILLED_RE = re.compile(
 )
 
 
-def init_ld_logger():
-    """Wire up the LD ObservabilityPlugin and grab a logger that ships to LD."""
+def init_ld_tracer():
+    """Wire up the LD ObservabilityPlugin and grab a tracer that ships to LD.
+
+    Spans (not raw LogRecords) for two reasons:
+      1. The OTLP gRPC log encoder in this SDK stack crashes on
+         span_id=None — emitting via the tracer means span_id is always
+         a real value owned by the span itself.
+      2. OOM-kill events have a natural single-point-in-time semantic
+         that maps cleanly to an instantaneous span, and they show up
+         next to existing distributed traces in the LD UI.
+    """
     if not LD_SDK_KEY:
         print("ERROR: LD_SDK_KEY not set — refusing to start", file=sys.stderr)
         sys.exit(2)
@@ -70,9 +77,9 @@ def init_ld_logger():
         )
     )
     ldclient.set_config(Config(sdk_key=LD_SDK_KEY, plugins=[plugin]))
-    # Touch the client so the plugin's tracer/logger providers actually init.
+    # Touch the client so the plugin's tracer provider actually inits.
     _ = ldclient.get()
-    return get_logger(SERVICE_NAME)
+    return trace.get_tracer(SERVICE_NAME)
 
 
 def get_docker_client() -> Optional[docker.DockerClient]:
@@ -109,12 +116,14 @@ def resolve_container(client: Optional[docker.DockerClient], cid: str) -> dict:
 def tail_dmesg():
     """Yield each kernel ring-buffer line as it arrives.
 
-    `dmesg --follow` blocks for new entries; `--time-format iso` gives us
-    a parseable timestamp so we don't have to compute one from --human.
+    `--follow-new` (util-linux 2.30+) only emits new entries — without it,
+    `--follow` replays the entire ring buffer first, which on a long-running
+    box means tens of MB of stale events referencing container IDs from days
+    ago that no longer exist (so cgroup→name resolution returns NotFound).
+    `--time-format iso` gives us parseable timestamps in the line.
     """
-    # -w: follow; -T disabled in favor of explicit iso timestamps.
     proc = subprocess.Popen(
-        ["dmesg", "--follow", "--time-format", "iso"],
+        ["dmesg", "--follow-new", "--time-format", "iso"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -132,7 +141,7 @@ def tail_dmesg():
 
 
 def main():
-    logger = init_ld_logger()
+    tracer = init_ld_tracer()
     docker_client = get_docker_client()
     print(f"[oom-watcher] started ({SERVICE_NAME} v{SERVICE_VERSION} env={ENVIRONMENT})", flush=True)
     print(f"[oom-watcher] tailing dmesg; docker={'connected' if docker_client else 'unavailable'}", flush=True)
@@ -178,15 +187,11 @@ def main():
                     f"in container={container.get('container.name', cid[:12])}"
                 )
                 print(f"[oom-watcher] {body}", flush=True)
-                logger.emit(
-                    LogRecord(
-                        timestamp=int(time.time() * 1e9),
-                        severity_text="ERROR",
-                        severity_number=17,  # ERROR
-                        body=body,
-                        attributes=attrs,
-                    )
-                )
+                # Emit as an instantaneous span. Span attributes carry the
+                # parsed fields; the description carries the human summary.
+                with tracer.start_as_current_span("kernel.oom_kill") as span:
+                    span.set_attributes(attrs)
+                    span.set_status(Status(StatusCode.ERROR, body))
                 pending = None
         except Exception as e:
             print(f"[oom-watcher] parse error: {e} line={raw!r}", flush=True)
