@@ -16,10 +16,13 @@ COPY simulator/requirements.txt /app/
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers. Three engines (~+400 MB vs chromium-only)
-# to diversify the session replay gallery — Chrome/Edge ride the chromium
-# engine (Edge via UA spoof), Safari/iOS ride webkit, Firefox rides firefox.
-RUN playwright install chromium firefox webkit
+# Install Playwright browsers. Two engines (chromium + firefox) — Chrome,
+# Edge, Safari, iOS, and Android profiles all ride chromium with UA / device
+# overrides per-context (the session-replay UI keys browser identity off the
+# UA string, not the underlying engine). WebKit on Linux (WPEWebProcess) was
+# dropped after repeated cgroup OOM kills in the renderer; chromium and
+# firefox are stable under sustained context churn.
+RUN playwright install chromium firefox
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1

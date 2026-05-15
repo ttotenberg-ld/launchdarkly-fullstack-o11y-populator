@@ -374,6 +374,7 @@ services:
       - MAX_CONCURRENT_BROWSERS=${MAX_CONCURRENT_BROWSERS:-3}
       - TARGET_SESSION_DURATION=${TARGET_SESSION_DURATION:-60}
       - SESSION_TIMEOUT=${SESSION_TIMEOUT:-90}
+      - WEDGE_NO_SUCCESS_SECONDS=${WEDGE_NO_SUCCESS_SECONDS:-300}
     volumes:
       - ./simulator/logs:/app/logs
     depends_on:
@@ -382,13 +383,57 @@ services:
     networks:
       - ld-observability
     restart: unless-stopped
-    # Playwright needs more resources. 3 engines × up to 3 concurrent contexts
+    # Heartbeat file is touched on every successful session by the python
+    # supervisor; if it goes stale, the wedge detector inside python will
+    # sys.exit(1) and restart: unless-stopped brings us back. This check
+    # primarily exists so `docker ps` surfaces the unhealthy state before
+    # the python-side wedge detector fires — visibility, not enforcement.
+    # HOSTNAME differs per replica so simulator-1/-2/-3 each see their own
+    # heartbeat on the shared ./simulator/logs bind mount.
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/logs/.heartbeat-$$HOSTNAME && find /app/logs/.heartbeat-$$HOSTNAME -mmin -3 | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    # Playwright needs more resources. 2 engines × up to 3 concurrent contexts
     # blows past 2G during peak; 4G gives headroom + room for the periodic
     # recycle to overlap old+new engine processes briefly without OOM.
     deploy:
       resources:
         limits:
           memory: 4G
+
+  # OOM watcher — tails the host kernel ring buffer (dmesg) for cgroup
+  # OOM-kill events, resolves the offending cgroup back to a docker
+  # container name, and ships a structured log to LaunchDarkly via the
+  # existing ObservabilityPlugin. Why: docker inspect's OOMKilled flag
+  # only flips when PID 1 is the kill target; renderer-subprocess kills
+  # (chrome-headless, WPEWebProcess inside the simulator) leave the
+  # container "Up" while it silently wedges. This sidecar surfaces those.
+  oom-watcher:
+    build:
+      context: .
+      dockerfile: oom-watcher/Dockerfile
+    environment:
+      - LD_SDK_KEY=${LD_SDK_KEY}
+      - SERVICE_NAME=oom-watcher
+      - SERVICE_VERSION=${SERVICE_VERSION:-2.0.2}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    # pid:host so dmesg can read the host kernel ring buffer (not the
+    # container's namespaced view, which is empty).
+    pid: host
+    # SYS_ADMIN is sufficient on most kernels for unprivileged dmesg; if
+    # your host has kernel.dmesg_restrict=1 (common on hardened AMIs),
+    # bump to `privileged: true` instead.
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      # Read-only docker.sock so we can resolve cgroup IDs → container names.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ld-observability
+    restart: unless-stopped
 
 volumes:
   ollama_data:

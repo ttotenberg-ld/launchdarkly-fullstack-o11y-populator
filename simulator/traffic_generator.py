@@ -11,6 +11,7 @@ Sessions are designed to be ~60 seconds long with human-like behavior:
 
 import os
 import sys
+import time
 import random
 import asyncio
 import uuid
@@ -34,8 +35,8 @@ MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', '3'))
 TARGET_SESSION_DURATION = int(os.getenv('TARGET_SESSION_DURATION', '60'))  # seconds
 SESSION_TIMEOUT = int(os.getenv('SESSION_TIMEOUT', '90'))  # hard cap per session
 # Round-robin recycle one engine on a timer to bound long-running renderer
-# memory growth (WebKit's WPEWebProcess in particular). This value is the
-# full-rotation period; with 3 engines we recycle one every INTERVAL/3 minutes.
+# memory growth. This value is the full-rotation period; with N engines we
+# recycle one every INTERVAL/N minutes.
 RECYCLE_INTERVAL_MINUTES = int(os.getenv('RECYCLE_INTERVAL_MINUTES', '30'))
 # Backstop for the "renderer died, main process lies" case: if this many
 # sessions fail back-to-back, give up and exit so Docker restarts us fresh.
@@ -82,12 +83,21 @@ EDGE_UA = (
 # (form_factor, engine, weight, ua_override, device_preset, label)
 # Mobile entries set ua_override=None — the Playwright device preset
 # provides an appropriate mobile UA already (iOS Safari / Android Chrome).
+#
+# Safari / iOS profiles ride chromium with a Safari UA override. WebKit
+# on Linux (WPEWebProcess) leaks VM aggressively under repeated context
+# churn — every cgroup OOM in our kernel logs was a WebKit renderer,
+# never chromium or firefox. The session-replay UI keys browser/device
+# off the User-Agent string, not the underlying engine, so the demo
+# gallery still shows "Safari" and "Mobile Safari on iPhone 13".
+# iPhone 13 device preset on chromium also injects a Safari-like UA so
+# we leave ua_override=None for the mobile row.
 BROWSER_PROFILES = [
     ('desktop', 'chromium', 0.40, CHROME_UA,  None,        'desktop_chrome'),
-    ('desktop', 'webkit',   0.11, SAFARI_UA,  None,        'desktop_safari'),
+    ('desktop', 'chromium', 0.11, SAFARI_UA,  None,        'desktop_safari'),
     ('desktop', 'chromium', 0.05, EDGE_UA,    None,        'desktop_edge'),
     ('desktop', 'firefox',  0.04, FIREFOX_UA, None,        'desktop_firefox'),
-    ('mobile',  'webkit',   0.22, None,       'iPhone 13', 'mobile_ios_safari'),
+    ('mobile',  'chromium', 0.22, None,       'iPhone 13', 'mobile_ios_safari'),
     ('mobile',  'chromium', 0.18, None,       'Pixel 7',   'mobile_android_chrome'),
 ]
 
@@ -105,6 +115,23 @@ DESKTOP_VIEWPORTS = [
 # and flag evaluations.  Check this file to verify overlap in the LD dashboard.
 SESSION_LOG_FILE = os.getenv('SESSION_LOG_FILE', '/app/logs/session_keys.log')
 EVENT_LOG_FILE = os.getenv('EVENT_LOG_FILE', '/app/logs/ld_events.log')
+
+# Per-replica heartbeat — touched on every successful session. The compose
+# healthcheck reads its mtime to detect a wedged simulator (renderer-OOMed
+# but main process still "Up" so Docker can't see the problem). HOSTNAME is
+# unique per container when scaled, so simulator-1/-2/-3 don't stomp each
+# other on the shared /app/logs bind mount.
+HEARTBEAT_FILE = os.getenv(
+    'HEARTBEAT_FILE',
+    f"/app/logs/.heartbeat-{os.getenv('HOSTNAME', 'unknown')}",
+)
+
+# If no session has succeeded in this many seconds, the simulator is wedged
+# (e.g., renderer dead under a still-connected browser handle). Hard-exit so
+# `restart: unless-stopped` brings us back fresh. Generous default: 3× the
+# session-start cadence at default settings, so a transient slow stretch
+# doesn't false-positive.
+WEDGE_NO_SUCCESS_SECONDS = int(os.getenv('WEDGE_NO_SUCCESS_SECONDS', '300'))
 
 # Sample search queries with intentional typos for realistic typing
 SEARCH_QUERIES = [
@@ -1469,6 +1496,13 @@ class TrafficGenerator:
         # Backstop for the "renderer died but is_connected() still returns
         # True" case: counts back-to-back session failures, reset on success.
         self.consecutive_errors: int = 0
+        # Second backstop for the same wedge condition: consecutive_errors
+        # resets on any success, so if one engine succeeds while another
+        # silently fails the counter never accumulates. last_success_at
+        # tracks wall-clock progress instead, so a long stretch of
+        # zero-success time triggers a hard exit even with sporadic success
+        # on a subset of engines.
+        self.last_success_at: float = time.monotonic()
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(SESSION_LOG_FILE), exist_ok=True)
@@ -1724,6 +1758,14 @@ class TrafficGenerator:
             else:
                 self.success_count += 1
                 self.consecutive_errors = 0
+                self.last_success_at = time.monotonic()
+                # Heartbeat for compose healthcheck. Best-effort: a failure
+                # to touch the file shouldn't taint a successful session.
+                try:
+                    with open(HEARTBEAT_FILE, "w") as hb:
+                        hb.write(datetime.now().isoformat())
+                except Exception:
+                    pass
 
             endpoints = result.get('endpoints_hit', [])
             duration = result.get('session_duration_seconds', 0)
@@ -1750,8 +1792,6 @@ class TrafficGenerator:
             )
         if name == 'firefox':
             return await self.playwright.firefox.launch(headless=True)
-        if name == 'webkit':
-            return await self.playwright.webkit.launch(headless=True)
         raise ValueError(f"unknown engine: {name}")
 
     async def _recycle_engine(self, name: str):
@@ -1776,7 +1816,7 @@ class TrafficGenerator:
         """Background task: round-robin recycle one engine on a timer. Runs
         independently of the session loop — much simpler than the previous
         drain-and-recycle approach, and easier to verify it's firing."""
-        engines_to_cycle = ['chromium', 'firefox', 'webkit']
+        engines_to_cycle = ['chromium', 'firefox']
         sleep_seconds = RECYCLE_INTERVAL_MINUTES * 60 / len(engines_to_cycle)
         idx = 0
         while not self.fatal_error:
@@ -1829,21 +1869,23 @@ class TrafficGenerator:
         print(f"{'='*70}\n")
 
         async with async_playwright() as p:
-            # Launch all three engines once; reuse across sessions. Edge
-            # reuses the chromium engine with a UA override per-context.
+            # Launch engines once; reuse across sessions. Edge + Safari +
+            # iOS/Android profiles all ride chromium with a UA/device override
+            # per-context. WebKit dropped — see BROWSER_PROFILES comment.
             # LD's session replay pipeline (via Highlight) filters sessions
             # from automated browsers, so we mask automation signals via
             # per-engine stealth init scripts in run_session.
             self.playwright = p
-            for name in ('chromium', 'firefox', 'webkit'):
+            for name in ('chromium', 'firefox'):
                 self.engines[name] = await self._launch_engine(name)
                 self.session_count_per_engine[name] = 0
-            print(f"  ✓ Launched engines: chromium, firefox, webkit\n")
-            recycle_period_s = RECYCLE_INTERVAL_MINUTES * 60 / 3
+            print(f"  ✓ Launched engines: chromium, firefox\n")
+            recycle_period_s = RECYCLE_INTERVAL_MINUTES * 60 / 2
             print(f"  ✓ Recycling one engine every {recycle_period_s/60:.1f} min "
                   f"(each engine every {RECYCLE_INTERVAL_MINUTES} min); "
                   f"exit after {MAX_CONSECUTIVE_SESSION_ERRORS} consecutive "
-                  f"failures\n")
+                  f"failures or {WEDGE_NO_SUCCESS_SECONDS}s without a success\n")
+            print(f"  ✓ Heartbeat: {HEARTBEAT_FILE}\n")
             recycle_task = asyncio.create_task(self._recycle_loop())
 
             # Track running session tasks
@@ -1894,14 +1936,30 @@ class TrafficGenerator:
                         break
 
                     # Backstop: is_connected() returns True even when the
-                    # renderer subprocess (e.g., WebKit's WPEWebProcess) has
-                    # been OOM-killed under the main browser process. If
-                    # sessions are failing back-to-back, give up and let
-                    # Docker restart us.
+                    # renderer subprocess (e.g., chrome-headless) has been
+                    # OOM-killed under the main browser process. If sessions
+                    # are failing back-to-back, give up and let Docker
+                    # restart us.
                     if self.consecutive_errors >= MAX_CONSECUTIVE_SESSION_ERRORS:
                         self.fatal_error = (
                             f"{self.consecutive_errors} consecutive session "
                             f"failures — exiting for container restart"
+                        )
+                        print(f"\n[FATAL] {self.fatal_error}\n")
+                        break
+
+                    # Wall-clock backstop: consecutive_errors resets on any
+                    # success, which masks the case where one engine's
+                    # sessions silently fail while another's succeed. If no
+                    # session has succeeded in WEDGE_NO_SUCCESS_SECONDS,
+                    # the simulator is making no useful progress regardless
+                    # of the success-rate ratio. Exit for container restart.
+                    stale_seconds = time.monotonic() - self.last_success_at
+                    if stale_seconds > WEDGE_NO_SUCCESS_SECONDS:
+                        self.fatal_error = (
+                            f"no successful session in {stale_seconds:.0f}s "
+                            f"(threshold {WEDGE_NO_SUCCESS_SECONDS}s) — "
+                            f"exiting for container restart"
                         )
                         print(f"\n[FATAL] {self.fatal_error}\n")
                         break

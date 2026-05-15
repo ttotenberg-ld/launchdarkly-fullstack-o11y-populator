@@ -146,6 +146,17 @@ This step installs everything needed. Run these commands in order.
 # Install Docker and Git
 sudo dnf install -y docker git
 
+# Cap container log files BEFORE first start. The default json-file driver is
+# unbounded and will silently fill the 100 GB root volume over the lifetime of
+# a long-running demo box (the simulator alone writes hundreds of MB/day).
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "5" }
+}
+EOF
+
 # Start Docker and enable on boot
 sudo systemctl enable --now docker
 
@@ -452,6 +463,16 @@ set -e
 # Install Docker (idempotent - skips if already installed)
 if ! command -v docker &>/dev/null; then
   dnf install -y docker git
+
+  # Cap container logs before docker first starts (json-file is unbounded by default)
+  mkdir -p /etc/docker
+  cat > /etc/docker/daemon.json <<'DOCKER_EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "5" }
+}
+DOCKER_EOF
+
   systemctl enable --now docker
   usermod -aG docker ec2-user
 
